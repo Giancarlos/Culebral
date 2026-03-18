@@ -756,6 +756,96 @@ public class EmitTests : IDisposable
         Assert.Equal("25\n169", output);
     }
 
+    // ─── Phase 2 Completion: Generics ───
+
+    [Fact]
+    public void GenericClass_WithInt_Works()
+    {
+        var output = CompileAndRun("""
+            class Box[T]:
+                value: T
+
+                def __init__(v: T):
+                    value = v
+
+                def get_value() -> T:
+                    return value
+
+            def main():
+                b = Box(42)
+                print(b.get_value())
+            """);
+        Assert.Equal("42", output);
+    }
+
+    [Fact]
+    public void GenericClass_WithString_Works()
+    {
+        var output = CompileAndRun("""
+            class Box[T]:
+                value: T
+
+                def __init__(v: T):
+                    value = v
+
+                def get_value() -> T:
+                    return value
+
+            def main():
+                b = Box("hello")
+                print(b.get_value())
+            """);
+        Assert.Equal("hello", output);
+    }
+
+    [Fact]
+    public void GenericClass_MultipleTypeParams_Works()
+    {
+        var output = CompileAndRun("""
+            class Pair[A, B]:
+                first: A
+                second: B
+
+                def __init__(a: A, b: B):
+                    first = a
+                    second = b
+
+                def get_first() -> A:
+                    return first
+
+                def get_second() -> B:
+                    return second
+
+            def main():
+                p = Pair(42, "hello")
+                print(p.get_first())
+                print(p.get_second())
+            """);
+        Assert.Equal("42\nhello", output);
+    }
+
+    [Fact]
+    public void GenericClass_DifferentInstantiations_Works()
+    {
+        var output = CompileAndRun("""
+            class Box[T]:
+                value: T
+
+                def __init__(v: T):
+                    value = v
+
+                def get_value() -> T:
+                    return value
+
+            def main():
+                int_box = Box(42)
+                str_box = Box("world")
+                print(int_box.get_value())
+                print(str_box.get_value())
+            """);
+        Assert.Equal("42\nworld", output);
+    }
+
     [Fact]
     public void CompilationDiagnostics_ReportErrors()
     {

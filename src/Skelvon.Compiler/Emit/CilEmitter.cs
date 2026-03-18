@@ -462,8 +462,8 @@ public sealed class CilEmitter
                 EmitMethodCall(il, dt, mn, ac);
                 break;
 
-            case IrNewObj { TypeName: var typeName, ArgCount: var argc }:
-                EmitNewObj(il, typeName, argc);
+            case IrNewObj newObj:
+                EmitNewObj(il, newObj.TypeName, newObj.ArgCount, newObj, func);
                 break;
 
             case IrBox { Type: var type }:
@@ -509,7 +509,16 @@ public sealed class CilEmitter
             {
                 var key = $"{dt}.{fname}";
                 if (_fieldBuilders.TryGetValue(key, out var storeFb))
+                {
+                    // Auto-box value types when storing to object fields (type erasure)
+                    if (storeFb.FieldType == typeof(object))
+                    {
+                        var valueType = InferStackTopType(instr, func);
+                        if (valueType.IsValueType)
+                            il.Emit(OpCodes.Box, valueType);
+                    }
                     il.Emit(OpCodes.Stfld, storeFb);
+                }
                 break;
             }
 
@@ -794,7 +803,7 @@ public sealed class CilEmitter
         }
     }
 
-    private void EmitNewObj(ILGenerator il, string typeName, int argc)
+    private void EmitNewObj(ILGenerator il, string typeName, int argc, IrInstruction instr, IrFunction func)
     {
         if (typeName.StartsWith("System.Collections.Generic.List"))
         {
@@ -806,6 +815,29 @@ public sealed class CilEmitter
         // Look for a user-defined constructor
         if (_constructorBuilders.TryGetValue(typeName, out var cb))
         {
+            // Auto-box value type args going to object params (type erasure for generics)
+            var ctorParams = cb.GetParameters();
+            if (argc > 0 && ctorParams.Any(p => p.ParameterType == typeof(object)))
+            {
+                // Save all args to typed locals, then reload with boxing where needed
+                var argLocals = new LocalBuilder[argc];
+                // Pop args in reverse order (stack is LIFO)
+                for (int i = argc - 1; i >= 0; i--)
+                {
+                    // Use object locals — values are either already reference types or need boxing
+                    argLocals[i] = il.DeclareLocal(typeof(object));
+                    if (ctorParams.Length > i && ctorParams[i].ParameterType == typeof(object))
+                    {
+                        // Determine the actual value type on the stack
+                        var argType = InferNthArgType(instr, func, i, argc);
+                        if (argType.IsValueType)
+                            il.Emit(OpCodes.Box, argType);
+                    }
+                    il.Emit(OpCodes.Stloc, argLocals[i]);
+                }
+                for (int i = 0; i < argc; i++)
+                    il.Emit(OpCodes.Ldloc, argLocals[i]);
+            }
             il.Emit(OpCodes.Newobj, cb);
             return;
         }
@@ -941,6 +973,24 @@ public sealed class CilEmitter
         };
     }
 
+    /// <summary>Infer the type of the Nth argument (0-based) before a call instruction.</summary>
+    private Type InferNthArgType(IrInstruction callInstr, IrFunction func, int argIndex, int totalArgs)
+    {
+        // Walk backwards from the call instruction to find the instruction that produces the Nth arg
+        foreach (var block in func.Body)
+        {
+            for (int i = 0; i < block.Instructions.Count; i++)
+            {
+                if (!ReferenceEquals(block.Instructions[i], callInstr)) continue;
+                // The args are the `totalArgs` instructions before this one
+                var targetIdx = i - totalArgs + argIndex;
+                if (targetIdx >= 0 && targetIdx < i)
+                    return InferInstructionResultType(block.Instructions[targetIdx], func);
+            }
+        }
+        return typeof(object);
+    }
+
     // ─── Assembly Save ───
 
     private void SaveAssembly(IrModule module)
@@ -1008,6 +1058,7 @@ public sealed class CilEmitter
             ClassType c => _typeBuilders.TryGetValue(c.Name, out var tb) ? tb : typeof(object),
             StructType s => _typeBuilders.TryGetValue(s.Name, out var tb) ? tb : typeof(object),
             RecordType r => _typeBuilders.TryGetValue(r.Name, out var tb) ? tb : typeof(object),
+            TypeParameterType => typeof(object), // Type erasure: T → object
             FunctionType => typeof(Delegate),
             _ => typeof(object),
         };

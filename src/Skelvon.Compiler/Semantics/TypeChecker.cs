@@ -14,6 +14,7 @@ public sealed class TypeChecker
     private SymbolScope _currentScope;
     private readonly Dictionary<AstNode, SkelvonType> _resolvedTypes = new();
     private string? _currentClassName;
+    private readonly HashSet<string> _knownTypeParams = new();
 
     public TypeChecker(DiagnosticBag diagnostics)
     {
@@ -198,6 +199,26 @@ public sealed class TypeChecker
         var prevClassName = _currentClassName;
         _currentClassName = cls.Name;
 
+        // Register type parameters (T, U, etc.) in scope
+        if (cls.TypeParameters is not null)
+        {
+            foreach (var tp in cls.TypeParameters)
+            {
+                _knownTypeParams.Add(tp.Name);
+                classScope.TryDeclare(new Symbol
+                {
+                    Name = tp.Name,
+                    Kind = SymbolKind.Type,
+                    Type = new TypeParameterType(tp.Name),
+                    IsMutable = false,
+                });
+            }
+        }
+
+        // Switch to class scope BEFORE resolving field types (so T is visible)
+        var prevScope = _currentScope;
+        _currentScope = classScope;
+
         // Declare fields
         foreach (var member in cls.Members)
         {
@@ -213,9 +234,6 @@ public sealed class TypeChecker
                 });
             }
         }
-
-        var prevScope = _currentScope;
-        _currentScope = classScope;
 
         foreach (var member in cls.Members)
         {
@@ -242,6 +260,10 @@ public sealed class TypeChecker
         var prevClassName = _currentClassName;
         _currentClassName = strct.Name;
         _currentScope = scope;
+
+        if (strct.TypeParameters is not null)
+            foreach (var tp in strct.TypeParameters)
+                scope.TryDeclare(new Symbol { Name = tp.Name, Kind = SymbolKind.Type, Type = new TypeParameterType(tp.Name), IsMutable = false });
 
         foreach (var member in strct.Members)
         {
@@ -274,6 +296,10 @@ public sealed class TypeChecker
         var prevClassName = _currentClassName;
         _currentClassName = rec.Name;
         _currentScope = scope;
+
+        if (rec.TypeParameters is not null)
+            foreach (var tp in rec.TypeParameters)
+                scope.TryDeclare(new Symbol { Name = tp.Name, Kind = SymbolKind.Type, Type = new TypeParameterType(tp.Name), IsMutable = false });
 
         foreach (var member in rec.Members)
         {
@@ -761,6 +787,10 @@ public sealed class TypeChecker
         var symbol = _currentScope.Lookup(name);
         if (symbol is { Kind: SymbolKind.Type })
             return symbol.Type;
+
+        // Check if it's a known type parameter (registered during checking, may not be in current scope during lowering)
+        if (_knownTypeParams.Contains(name))
+            return new TypeParameterType(name);
 
         _diagnostics.Error("SKV2005", $"Unknown type '{name}'", SourceSpan.None);
         return ErrorType.Instance;
