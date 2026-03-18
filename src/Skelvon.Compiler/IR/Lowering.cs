@@ -30,6 +30,9 @@ public sealed class IrLowering
     // Track known user types for constructor call detection
     private readonly HashSet<string> _knownTypes = new();
 
+    // Store function definitions for default parameter lookup
+    private readonly Dictionary<string, FunctionDef> _functionDefs = new();
+
     public IrLowering(DiagnosticBag diagnostics, TypeChecker typeChecker)
     {
         _diagnostics = diagnostics;
@@ -40,13 +43,14 @@ public sealed class IrLowering
     {
         var module = new IrModule { Name = moduleName, SourcePath = sourcePath };
 
-        // Collect known type names first (for constructor call detection)
+        // Collect known type and function names
         foreach (var node in unit.Statements)
         {
             if (node is ClassDef c) _knownTypes.Add(c.Name);
             else if (node is StructDef s) _knownTypes.Add(s.Name);
             else if (node is RecordDef r) _knownTypes.Add(r.Name);
             else if (node is EnumDef e) _knownTypes.Add(e.Name);
+            else if (node is FunctionDef f) _functionDefs[f.Name] = f;
         }
 
         // First pass: lower type definitions
@@ -843,9 +847,19 @@ public sealed class IrLowering
         _currentFunction.Body.Add(bodyBlock);
         _currentBlock = bodyBlock;
 
-        var loopVar = GetOrCreateLocal(forStmt.Variable, forStmt.Span);
+        // Determine element type from iterable (range → int, otherwise object)
+        var iterableType = _typeChecker.ResolvedTypes.TryGetValue(forStmt.Iterable, out var it) ? it : null;
+        var elementType = PrimitiveType.Object;
+        // range() returns IEnumerable<int>
+        if (forStmt.Iterable is CallExpr { Callee: IdentifierExpr { Name: "range" } })
+            elementType = PrimitiveType.Int;
+
+        var loopVar = GetOrCreateLocal(forStmt.Variable, forStmt.Span, elementType);
         _currentBlock.Emit(new IrLoadLocal(enumeratorLocal.Index, forStmt.Span));
         _currentBlock.Emit(new IrCallVirtual("get_Current", 0, forStmt.Span));
+        // Unbox value types returned from IEnumerator.Current (which returns object)
+        if (elementType != PrimitiveType.Object)
+            _currentBlock.Emit(new IrUnbox(elementType, forStmt.Span));
         _currentBlock.Emit(new IrStoreLocal(loopVar.Index, forStmt.Span));
 
         _loopStack.Push((endLabel, condLabel));
@@ -1039,10 +1053,12 @@ public sealed class IrLowering
                 return;
             }
 
-            // Regular function call
+            // Regular function call — fill in default args if needed
             foreach (var arg in call.Arguments)
                 LowerExpression(arg.Value);
-            _currentBlock.Emit(new IrCall(ident.Name, call.Arguments.Count, true, call.Span));
+            EmitDefaultArgs(ident.Name, call.Arguments.Count, call.Span);
+            var totalArgs = GetTotalArgCount(ident.Name, call.Arguments.Count);
+            _currentBlock.Emit(new IrCall(ident.Name, totalArgs, true, call.Span));
             return;
         }
 
@@ -1292,4 +1308,32 @@ public sealed class IrLowering
         TokenKind.KwNot => IrUnaryOpKind.LogicalNot,
         _ => IrUnaryOpKind.Negate,
     };
+
+    /// <summary>Emit default argument values for missing positional args.</summary>
+    private void EmitDefaultArgs(string funcName, int providedArgs, SourceSpan span)
+    {
+        if (_currentBlock is null) return;
+        if (!_functionDefs.TryGetValue(funcName, out var funcDef)) return;
+
+        for (int i = providedArgs; i < funcDef.Parameters.Count; i++)
+        {
+            var param = funcDef.Parameters[i];
+            if (param.Default is not null)
+            {
+                LowerExpression(param.Default);
+            }
+            else
+            {
+                // No default — emit a zero/null value
+                _currentBlock.Emit(new IrLoadNull(span));
+            }
+        }
+    }
+
+    private int GetTotalArgCount(string funcName, int providedArgs)
+    {
+        if (_functionDefs.TryGetValue(funcName, out var funcDef))
+            return funcDef.Parameters.Count;
+        return providedArgs;
+    }
 }

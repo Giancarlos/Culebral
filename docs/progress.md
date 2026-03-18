@@ -102,12 +102,18 @@ The compiler implements a full pipeline: Source → Lexer → Parser → Type Ch
 - Hello World
 - Fibonacci (recursive)
 - Factorial (recursive)
-- Integer arithmetic (all operators)
+- Integer and float arithmetic (all operators)
 - String concatenation (`+` operator)
 - F-string interpolation (`f"Hello, {name}!"`)
 - Conditional branching (if/elif/else, nested)
 - While loops with augmented assignment
-- For loops with `range()`
+- For loops with `range()`, including nested
+- Break and continue in loops
+- Mutual recursion (forward references between functions)
+- Default parameter values
+- Boolean logic (`and`, `or`, `not`)
+- All comparison operators (`==`, `!=`, `<`, `>`, `<=`, `>=`)
+- Type-annotated variables
 - Nested function calls
 - Multi-parameter functions
 - String return values
@@ -124,36 +130,29 @@ The compiler implements a full pipeline: Source → Lexer → Parser → Type Ch
 - Classes implementing multiple interfaces
 
 ## Test Suite
-- 83 tests total, all passing
+- 92 tests total, all passing
 - Lexer tests: 14 (tokens, literals, indentation, brackets, edge cases)
 - Parser tests: 30 (all language constructs)
 - Type checker tests: 10 (symbols, types, errors)
-- End-to-end emit tests: 29 (compile → run → verify output)
-  - Phase 1: 20 tests (functions, control flow, arithmetic, strings)
+- End-to-end emit tests: 38 (compile → run → verify output)
+  - Phase 1 core: 20 tests (functions, control flow, arithmetic, strings)
+  - Phase 1 completion: 9 tests (mutual recursion, floats, nested loops, defaults, booleans, break/continue)
   - Phase 2: 9 tests (classes, constructors, fields, @field, interfaces)
 
 ## Known Limitations / Next Steps
 
-### Near Term (Phase 1 completion)
-- For loops don't work end-to-end yet (enumerator pattern needs full implementation)
-- No .NET interop yet (can't import BCL types)
-- No generics in emitted code (only in type checker)
-- Properties not fully emitted
-- No pattern matching codegen
-- No async/await codegen
-- No f-string interpolation codegen (parsed but not emitted)
-- Comprehension codegen incomplete
-- No class instantiation / constructor calls
-
-### Phase 2 (Type System + Classes)
-- Full class emission with fields, constructors, methods
-- `@field` access in instance methods
-- Interface implementation
-- Generic type emission
-- Struct value semantics
-
-### Phase 3 (.NET Interop)
+### Phase 3 (.NET Interop) — Next
 - Assembly metadata reading for BCL type resolution
 - Case convention bridging (snake_case → PascalCase)
 - NuGet package resolution
 - Extension method support
+
+### Phase 4 (Language Completeness)
+- Async/await codegen
+- Pattern matching codegen (match/case)
+- Comprehension codegen (list/dict/generator)
+- Generic type emission
+- Struct value semantics
+- Record immutability + equality
+- Properties (getter/setter emission)
+- Null safety with flow typing

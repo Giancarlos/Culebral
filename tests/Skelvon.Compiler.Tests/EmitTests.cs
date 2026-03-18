@@ -282,6 +282,143 @@ public class EmitTests : IDisposable
         Assert.Equal("36", output);
     }
 
+    // ─── Phase 1 Completion Tests ───
+
+    [Fact]
+    public void MutualRecursion_Works()
+    {
+        var output = CompileAndRun("""
+            def is_even(n: int) -> bool:
+                if n == 0:
+                    return True
+                return is_odd(n - 1)
+
+            def is_odd(n: int) -> bool:
+                if n == 0:
+                    return False
+                return is_even(n - 1)
+
+            def main():
+                print(is_even(4))
+                print(is_odd(3))
+            """);
+        Assert.Equal("True\nTrue", output);
+    }
+
+    [Fact]
+    public void FloatArithmetic_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                x = 3.14
+                y = 2.0
+                print(x + y)
+            """);
+        Assert.StartsWith("5.14", output);
+    }
+
+    [Fact]
+    public void NestedForLoops_Work()
+    {
+        var output = CompileAndRun("""
+            def main():
+                for i in range(3):
+                    for j in range(2):
+                        print(i * 10 + j)
+            """);
+        Assert.Equal("0\n1\n10\n11\n20\n21", output);
+    }
+
+    [Fact]
+    public void DefaultParameters_Work()
+    {
+        var output = CompileAndRun("""
+            def greet(name: str, times: int = 1) -> str:
+                result = ""
+                i = 0
+                while i < times:
+                    result = result + name
+                    i += 1
+                return result
+
+            def main():
+                print(greet("Hi"))
+                print(greet("Ha", 3))
+            """);
+        Assert.Equal("Hi\nHaHaHa", output);
+    }
+
+    [Fact]
+    public void BooleanLogic_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(True and False)
+                print(True or False)
+                print(not True)
+                print(not False)
+            """);
+        Assert.Equal("False\nTrue\nFalse\nTrue", output);
+    }
+
+    [Fact]
+    public void ComparisonOperators_Work()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(5 > 3)
+                print(5 < 3)
+                print(5 == 5)
+                print(5 != 3)
+                print(5 >= 5)
+                print(5 <= 4)
+            """);
+        Assert.Equal("True\nFalse\nTrue\nTrue\nTrue\nFalse", output);
+    }
+
+    [Fact]
+    public void BreakContinue_Work()
+    {
+        var output = CompileAndRun("""
+            def main():
+                i = 0
+                while i < 10:
+                    i += 1
+                    if i == 3:
+                        continue
+                    if i == 6:
+                        break
+                    print(i)
+            """);
+        Assert.Equal("1\n2\n4\n5", output);
+    }
+
+    [Fact]
+    public void AnnotatedVariables_Work()
+    {
+        var output = CompileAndRun("""
+            def main():
+                x: int = 42
+                y: str = "hello"
+                print(x)
+                print(y)
+            """);
+        Assert.Equal("42\nhello", output);
+    }
+
+    [Fact]
+    public void ForLoopArithmetic_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                total = 0
+                for i in range(5):
+                    total += i
+                print(total)
+            """);
+        Assert.Equal("10", output);
+    }
+
     // ─── Phase 2: Class Tests ───
 
     [Fact]

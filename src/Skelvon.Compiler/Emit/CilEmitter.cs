@@ -287,10 +287,12 @@ public sealed class CilEmitter
         var programType = _moduleBuilder.DefineType("Program",
             TypeAttributes.Public | TypeAttributes.Class | TypeAttributes.Sealed);
 
+        // Pass 1: Define all method signatures (enables forward references / mutual recursion)
+        var functionsToEmit = new List<(IrFunction Func, MethodBuilder Builder)>();
         foreach (var func in module.Functions)
         {
             if (func.DeclaringType is not null)
-                continue; // Already emitted with type
+                continue;
 
             var returnClrType = ResolveClrType(func.ReturnType);
             var paramClrTypes = func.Parameters.Select(p => ResolveClrType(p.Type)).ToArray();
@@ -304,14 +306,17 @@ public sealed class CilEmitter
                 mb.DefineParameter(i + 1, ParameterAttributes.None, func.Parameters[i].Name);
 
             _methodBuilders[func.Name] = mb;
-
-            var il = mb.GetILGenerator();
-            EmitFunctionBody(il, func);
+            functionsToEmit.Add((func, mb));
 
             if (func.IsEntryPoint)
-            {
                 _entryPointMethod = mb;
-            }
+        }
+
+        // Pass 2: Emit all method bodies (all methods are now resolvable)
+        foreach (var (func, mb) in functionsToEmit)
+        {
+            var il = mb.GetILGenerator();
+            EmitFunctionBody(il, func);
         }
 
         programType.CreateType();
@@ -898,9 +903,13 @@ public sealed class CilEmitter
                 => typeof(bool),
             IrBinaryOp { Op: IrBinaryOpKind.Add, OperandType: PrimitiveType { Name: "str" } }
                 => typeof(string),
+            IrBinaryOp { Op: IrBinaryOpKind.LogicalAnd or IrBinaryOpKind.LogicalOr }
+                => typeof(bool),
+            IrBinaryOp { OperandType: PrimitiveType { Name: "float" } }
+                => typeof(double),
             IrBinaryOp { Op: IrBinaryOpKind.Add or IrBinaryOpKind.Sub or
                 IrBinaryOpKind.Mul or IrBinaryOpKind.Mod }
-                => typeof(int), // Simplified — should check operand types
+                => typeof(int),
             IrBinaryOp { Op: IrBinaryOpKind.Div } => typeof(double),
             IrCall { FunctionName: var name } when _methodBuilders.TryGetValue(name, out var mb)
                 => mb.ReturnType,
@@ -916,6 +925,8 @@ public sealed class CilEmitter
             IrCallBuiltin { Name: "float" } => typeof(double),
             IrCallBuiltin { Name: "str" } => typeof(string),
             IrCallBuiltin { Name: "bool" } => typeof(bool),
+            IrUnaryOp { Op: IrUnaryOpKind.LogicalNot } => typeof(bool),
+            IrUnaryOp { Op: IrUnaryOpKind.Negate } => typeof(int),
             IrToString => typeof(string),
             IrStringConcat => typeof(string),
             _ => typeof(object),
