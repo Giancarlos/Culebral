@@ -839,13 +839,28 @@ skelvon run hello.skv
 - **Goal:** Can use HttpClient, LINQ, read JSON — real programs
 
 **Phase 4 — Language Completeness (ongoing)**
-- Async/await
+- `is` / `is not` operators (runtime type checks and null checks)
+- `in` / `not in` operators (collection membership)
+- `raise` statement (throw exceptions)
+- `try`/`except`/`finally` (exception handling)
+- `**` (power) and `//` (floor division) operator emission
+- `range(start, stop)` and `range(start, stop, step)` overloads
+- Multiple assignment / tuple unpacking (`a, b = b, a`)
+- `*args` unpacking (maps to `params T[]`)
+- `__str__` / `__repr__` → `ToString()` mapping
 - Pattern matching with exhaustiveness
-- Algebraic enums
-- Records and structs
+- Algebraic enum match codegen
+- Async/await codegen
+- Lambda expressions (single and multi-line) → delegates
+- Comprehensions (list, dict, set, generator) codegen
+- `with` statement → `IDisposable` / `using`
 - Null safety with flow typing
-- Comprehensions
-- `with` statement
+- Slicing (`items[1:3]`, `items[::-1]`)
+- Named tuple returns and destructuring
+- Record `with` expressions (`alice with (name="Bob")`)
+- Type alias (`type HashMap[K, V] = Dictionary[K, V]`)
+- Decorator emission (attributes and wrappers)
+- Generic constraints enforcement
 - LSP server for editor support
 
 **Phase 5 — Standard Library (when needed)**

@@ -130,29 +130,49 @@ The compiler implements a full pipeline: Source → Lexer → Parser → Type Ch
 - Classes implementing multiple interfaces
 
 ## Test Suite
-- 92 tests total, all passing
+- 113 tests total, all passing
 - Lexer tests: 14 (tokens, literals, indentation, brackets, edge cases)
 - Parser tests: 30 (all language constructs)
 - Type checker tests: 10 (symbols, types, errors)
-- End-to-end emit tests: 38 (compile → run → verify output)
+- End-to-end emit tests: 59 (compile → run → verify output)
   - Phase 1 core: 20 tests (functions, control flow, arithmetic, strings)
   - Phase 1 completion: 9 tests (mutual recursion, floats, nested loops, defaults, booleans, break/continue)
-  - Phase 2: 9 tests (classes, constructors, fields, @field, interfaces)
+  - Phase 2 core: 9 tests (classes, constructors, fields, @field, interfaces)
+  - Phase 2 completion: 10 tests (structs, records, properties, generics)
+  - Phase 3: 11 tests (.NET interop, imports, case bridging, BCL access)
 
 ## Known Limitations / Next Steps
 
-### Phase 3 (.NET Interop) — Next
-- Assembly metadata reading for BCL type resolution
-- Case convention bridging (snake_case → PascalCase)
+### Phase 3 (.NET Interop) — Remaining
 - NuGet package resolution
-- Extension method support
+- Extension methods (LINQ)
+- .NET generic method calls
 
-### Phase 4 (Language Completeness)
+### Phase 4 (Language Completeness) — Next
+**Core operators & statements (not in any prior phase):**
+- `is` / `is not` operators (runtime type checks, null checks)
+- `in` / `not in` operators (collection membership)
+- `raise` statement (throw exceptions)
+- `try`/`except`/`finally` (exception handling)
+- `**` (power) and `//` (floor division) operator emission
+- `range(start, stop)` and `range(start, stop, step)` overloads
+- Multiple assignment / tuple unpacking (`a, b = b, a`)
+- `*args` unpacking (maps to `params T[]`)
+- `__str__` / `__repr__` → `ToString()` mapping
+
+**Major language features:**
+- Pattern matching with exhaustiveness (match/case codegen)
+- Algebraic enum match codegen
 - Async/await codegen
-- Pattern matching codegen (match/case)
-- Comprehension codegen (list/dict/generator)
-- Generic type emission
-- Struct value semantics
-- Record immutability + equality
-- Properties (getter/setter emission)
+- Lambda expressions → delegates
+- Comprehensions (list, dict, set, generator) full codegen
+- `with` statement → IDisposable / using
 - Null safety with flow typing
+- Slicing (`items[1:3]`, `items[::-1]`)
+- Named tuple returns and destructuring
+- Record `with` expressions
+- Type alias (`type X = Y`)
+- Decorator emission (attributes and wrappers)
+- Generic constraints enforcement
+- True struct value-type semantics
+- LSP server for editor support
