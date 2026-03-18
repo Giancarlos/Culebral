@@ -530,6 +530,61 @@ public sealed class CilEmitter
                 EmitIsInst(il, name);
                 break;
 
+            // ─── .NET Interop ───
+
+            case IrCallDotNetStatic { DeclaringType: var type, MethodName: var mname, ArgCount: var argc }:
+            {
+                var method = FindDotNetMethod(type, mname, argc, isStatic: true);
+                if (method is not null)
+                    il.Emit(OpCodes.Call, method);
+                else
+                    _diagnostics.Error("SKV4010", $"Cannot resolve .NET method {type.Name}.{mname}", instr.Span);
+                break;
+            }
+
+            case IrCallDotNetInstance { DeclaringType: var type, MethodName: var mname, ArgCount: var argc }:
+            {
+                var method = FindDotNetMethod(type, mname, argc, isStatic: false);
+                if (method is not null)
+                    il.Emit(OpCodes.Callvirt, method);
+                else
+                    _diagnostics.Error("SKV4011", $"Cannot resolve .NET instance method {type.Name}.{mname}", instr.Span);
+                break;
+            }
+
+            case IrLoadDotNetProperty { DeclaringType: var type, PropertyName: var pname, IsStatic: var isStatic }:
+            {
+                var flags = BindingFlags.Public | (isStatic ? BindingFlags.Static : BindingFlags.Instance);
+                var prop = type.GetProperty(pname, flags);
+                if (prop?.GetGetMethod() is { } getter)
+                    il.Emit(isStatic ? OpCodes.Call : OpCodes.Callvirt, getter);
+                else
+                    _diagnostics.Error("SKV4012", $"Cannot resolve .NET property {type.Name}.{pname}", instr.Span);
+                break;
+            }
+
+            case IrLoadDotNetField { DeclaringType: var type, FieldName: var fname, IsStatic: var isStatic }:
+            {
+                var flags = BindingFlags.Public | (isStatic ? BindingFlags.Static : BindingFlags.Instance);
+                var field = type.GetField(fname, flags);
+                if (field is not null)
+                    il.Emit(isStatic ? OpCodes.Ldsfld : OpCodes.Ldfld, field);
+                else
+                    _diagnostics.Error("SKV4013", $"Cannot resolve .NET field {type.Name}.{fname}", instr.Span);
+                break;
+            }
+
+            case IrNewDotNetObj { Type: var type, ArgCount: var argc }:
+            {
+                var ctor = type.GetConstructors(BindingFlags.Public | BindingFlags.Instance)
+                    .FirstOrDefault(c => c.GetParameters().Length == argc);
+                if (ctor is not null)
+                    il.Emit(OpCodes.Newobj, ctor);
+                else
+                    _diagnostics.Error("SKV4014", $"Cannot resolve .NET constructor for {type.Name} with {argc} args", instr.Span);
+                break;
+            }
+
             default:
                 il.Emit(OpCodes.Nop);
                 break;
@@ -753,37 +808,42 @@ public sealed class CilEmitter
 
     private static void EmitVirtualCall(ILGenerator il, string name, int argc)
     {
-        // For now, handle common method names
+        // Handle well-known enumerator methods
         switch (name)
         {
             case "GetEnumerator":
-                var getEnumerator = typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!;
-                il.Emit(OpCodes.Callvirt, getEnumerator);
-                break;
+                il.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!);
+                return;
             case "MoveNext":
-                var moveNext = typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!;
-                il.Emit(OpCodes.Callvirt, moveNext);
-                break;
+                il.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
+                return;
             case "get_Current":
-                var getCurrent = typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!;
-                il.Emit(OpCodes.Callvirt, getCurrent);
-                break;
+                il.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
+                return;
             case "Add":
-                // Generic List.Add — use object version
-                var addMethod = typeof(List<object>).GetMethod("Add")!;
-                il.Emit(OpCodes.Callvirt, addMethod);
-                break;
-            case "ToString":
-                var toString = typeof(object).GetMethod("ToString", Type.EmptyTypes)!;
-                il.Emit(OpCodes.Callvirt, toString);
-                break;
-            default:
-                // Unknown virtual call — pop args + this, push null
-                for (int i = 0; i < argc + 1; i++)
-                    il.Emit(OpCodes.Pop);
-                il.Emit(OpCodes.Ldnull);
-                break;
+                il.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("Add")!);
+                return;
         }
+
+        // Try snake_case → PascalCase resolution on common BCL types
+        var pascalName = Semantics.DotNetTypeResolver.SnakeToPascal(name);
+
+        // Try resolving on object/string — the most common base types for untyped calls
+        var typesToTry = new[] { typeof(string), typeof(object) };
+        foreach (var type in typesToTry)
+        {
+            var method = FindDotNetMethod(type, pascalName, argc, isStatic: false);
+            if (method is not null)
+            {
+                il.Emit(OpCodes.Callvirt, method);
+                return;
+            }
+        }
+
+        // Last resort: pop everything
+        for (int i = 0; i < argc + 1; i++)
+            il.Emit(OpCodes.Pop);
+        il.Emit(OpCodes.Ldnull);
     }
 
     private void EmitMethodCall(ILGenerator il, string declaringType, string methodName, int argc)
@@ -969,8 +1029,65 @@ public sealed class CilEmitter
             IrUnaryOp { Op: IrUnaryOpKind.Negate } => typeof(int),
             IrToString => typeof(string),
             IrStringConcat => typeof(string),
+            // .NET interop
+            IrCallVirtual { MethodName: var vn, ArgCount: var va } =>
+                ResolveVirtualCallReturnType(vn, va),
+            IrCallDotNetStatic { DeclaringType: var t, MethodName: var n, ArgCount: var a }
+                => FindDotNetMethod(t, n, a, true)?.ReturnType ?? typeof(object),
+            IrCallDotNetInstance { DeclaringType: var t, MethodName: var n, ArgCount: var a }
+                => FindDotNetMethod(t, n, a, false)?.ReturnType ?? typeof(object),
+            IrLoadDotNetProperty { DeclaringType: var t, PropertyName: var n, IsStatic: var s }
+                => t.GetProperty(n, BindingFlags.Public | (s ? BindingFlags.Static : BindingFlags.Instance))?.PropertyType ?? typeof(object),
+            IrNewDotNetObj { Type: var t } => t,
             _ => typeof(object),
         };
+    }
+
+    private static Type ResolveVirtualCallReturnType(string name, int argc)
+    {
+        var pascal = Semantics.DotNetTypeResolver.SnakeToPascal(name);
+        foreach (var type in new[] { typeof(string), typeof(object) })
+        {
+            var m = FindDotNetMethod(type, pascal, argc, false);
+            if (m is not null) return m.ReturnType;
+        }
+        return typeof(object);
+    }
+
+    private static MethodInfo? FindDotNetMethod(Type type, string name, int argCount, bool isStatic)
+    {
+        var flags = BindingFlags.Public | BindingFlags.FlattenHierarchy |
+                    (isStatic ? BindingFlags.Static : BindingFlags.Instance);
+
+        var candidates = type.GetMethods(flags)
+            .Where(m => m.Name == name && m.GetParameters().Length == argCount && !m.IsGenericMethod)
+            .ToArray();
+
+        if (candidates.Length == 0)
+        {
+            // Case-insensitive fallback
+            candidates = type.GetMethods(flags)
+                .Where(m => m.Name.Equals(name, StringComparison.OrdinalIgnoreCase)
+                             && m.GetParameters().Length == argCount && !m.IsGenericMethod)
+                .ToArray();
+        }
+
+        if (candidates.Length <= 1)
+            return candidates.FirstOrDefault();
+
+        // Overload resolution: prefer common Skelvon types
+        return candidates
+            .OrderByDescending(m => m.GetParameters().Sum(p => p.ParameterType switch
+            {
+                var t when t == typeof(string) => 10,
+                var t when t == typeof(int) => 9,
+                var t when t == typeof(double) => 8,
+                var t when t == typeof(bool) => 7,
+                var t when t == typeof(long) => 6,
+                var t when t == typeof(object) => 5,
+                _ => 0,
+            }))
+            .First();
     }
 
     /// <summary>Infer the type of the Nth argument (0-based) before a call instruction.</summary>
@@ -1058,7 +1175,8 @@ public sealed class CilEmitter
             ClassType c => _typeBuilders.TryGetValue(c.Name, out var tb) ? tb : typeof(object),
             StructType s => _typeBuilders.TryGetValue(s.Name, out var tb) ? tb : typeof(object),
             RecordType r => _typeBuilders.TryGetValue(r.Name, out var tb) ? tb : typeof(object),
-            TypeParameterType => typeof(object), // Type erasure: T → object
+            DotNetType dt => dt.ClrBackingType,
+            TypeParameterType => typeof(object),
             FunctionType => typeof(Delegate),
             _ => typeof(object),
         };

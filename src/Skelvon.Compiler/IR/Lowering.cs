@@ -36,6 +36,10 @@ public sealed class IrLowering
     // Store lowered type definitions for property/field resolution
     private readonly Dictionary<string, IrTypeDef> _typeDefs = new();
 
+    // .NET interop: imported types resolved via reflection
+    private readonly Dictionary<string, Type> _importedDotNetTypes = new();
+    private readonly Dictionary<string, string> _namespaceAliases = new(); // alias → namespace
+
     public IrLowering(DiagnosticBag diagnostics, TypeChecker typeChecker)
     {
         _diagnostics = diagnostics;
@@ -93,6 +97,13 @@ public sealed class IrLowering
                     break;
                 }
             }
+        }
+
+        // Process imports (populate .NET type mappings)
+        foreach (var node in unit.Statements)
+        {
+            if (node is FromImportStatement fromImport) ProcessFromImport(fromImport);
+            else if (node is ImportStatement import) ProcessImport(import);
         }
 
         // Second pass: lower functions
@@ -552,11 +563,18 @@ public sealed class IrLowering
         switch (stmt)
         {
             case ExpressionStatement exprStmt:
+            {
+                var instrCountBefore = _currentBlock.Instructions.Count;
                 LowerExpression(exprStmt.Expr);
-                // Pop the result if the expression leaves a value on the stack
-                if (ExpressionLeavesValue(exprStmt.Expr))
-                    _currentBlock.Emit(new IrPop(stmt.Span));
+                // Pop if the last instruction leaves a value (non-void call, etc.)
+                if (_currentBlock.Instructions.Count > instrCountBefore)
+                {
+                    var lastInstr = _currentBlock.Instructions[^1];
+                    if (InstructionLeavesValue(lastInstr))
+                        _currentBlock.Emit(new IrPop(stmt.Span));
+                }
                 break;
+            }
 
             case ReturnStatement ret:
                 if (ret.Value is not null)
@@ -614,10 +632,16 @@ public sealed class IrLowering
                 // TODO: emit throw instruction
                 break;
 
+            case FromImportStatement fromImport:
+                ProcessFromImport(fromImport);
+                break;
+
+            case ImportStatement import:
+                ProcessImport(import);
+                break;
+
             case FunctionDef:
             case ClassDef:
-            case ImportStatement:
-            case FromImportStatement:
             case WhenStatement:
                 break; // Handled at module level
 
@@ -982,19 +1006,56 @@ public sealed class IrLowering
 
             case MemberAccessExpr member:
             {
-                LowerExpression(member.Object);
                 var objType = _typeChecker.ResolvedTypes.TryGetValue(member.Object, out var ot) ? ot : null;
-                var typeName = objType?.DisplayName ?? "object";
 
-                // Check if this is a property access (needs getter call instead of field load)
-                if (_typeDefs.TryGetValue(typeName, out var memberTypeDef) &&
+                // .NET static property/field: Math.pi, Console.out
+                if (member.Object is IdentifierExpr objId && ResolveDotNetType(objId.Name) is Type staticDotNet)
+                {
+                    var pascalName = DotNetTypeResolver.SnakeToPascal(member.Member);
+                    var prop = _typeChecker.DotNetResolver.ResolveProperty(staticDotNet, member.Member, isStatic: true);
+                    if (prop is not null)
+                    {
+                        _currentBlock.Emit(new IrLoadDotNetProperty(staticDotNet, pascalName, true, expr.Span));
+                        break;
+                    }
+                    var field = _typeChecker.DotNetResolver.ResolveField(staticDotNet, member.Member, isStatic: true);
+                    if (field is not null)
+                    {
+                        _currentBlock.Emit(new IrLoadDotNetField(staticDotNet, pascalName, true, expr.Span));
+                        break;
+                    }
+                    // Could be a nested type or method ref — fall through
+                }
+
+                // .NET instance property: response.status_code
+                if (objType is DotNetType dotNetInstance)
+                {
+                    LowerExpression(member.Object);
+                    var pascalName = DotNetTypeResolver.SnakeToPascal(member.Member);
+                    _currentBlock.Emit(new IrLoadDotNetProperty(dotNetInstance.ClrBackingType, pascalName, false, expr.Span));
+                    break;
+                }
+
+                // .NET namespace member access: io.File → don't emit, used at call site
+                if (objType is DotNetNamespaceType)
+                {
+                    // This is resolved at the call site (LowerCall handles the chain)
+                    // Don't emit anything — the call handler will resolve the full chain
+                    break;
+                }
+
+                // Skelvon user type member access
+                LowerExpression(member.Object);
+                var typeNameStr = objType?.DisplayName ?? "object";
+
+                if (_typeDefs.TryGetValue(typeNameStr, out var memberTypeDef) &&
                     memberTypeDef.Properties.Any(p => p.Name == member.Member))
                 {
-                    _currentBlock.Emit(new IrCallMethod(typeName, $"get_{member.Member}", 0, expr.Span));
+                    _currentBlock.Emit(new IrCallMethod(typeNameStr, $"get_{member.Member}", 0, expr.Span));
                 }
                 else
                 {
-                    _currentBlock.Emit(new IrLoadField(typeName, member.Member, expr.Span));
+                    _currentBlock.Emit(new IrLoadField(typeNameStr, member.Member, expr.Span));
                 }
                 break;
             }
@@ -1100,12 +1161,22 @@ public sealed class IrLowering
                 return;
             }
 
-            // Constructor call: TypeName(args) → newobj .ctor
+            // Constructor call: TypeName(args) → newobj .ctor (Skelvon types)
             if (_knownTypes.Contains(ident.Name))
             {
                 foreach (var arg in call.Arguments)
                     LowerExpression(arg.Value);
                 _currentBlock.Emit(new IrNewObj(ident.Name, call.Arguments.Count, call.Span));
+                return;
+            }
+
+            // .NET type constructor: HttpClient() → newobj
+            var dotNetType = ResolveDotNetType(ident.Name);
+            if (dotNetType is not null)
+            {
+                foreach (var arg in call.Arguments)
+                    LowerExpression(arg.Value);
+                _currentBlock.Emit(new IrNewDotNetObj(dotNetType, call.Arguments.Count, call.Span));
                 return;
             }
 
@@ -1121,16 +1192,53 @@ public sealed class IrLowering
         // Method call: obj.method(args)
         if (call.Callee is MemberAccessExpr member)
         {
+            var objType = _typeChecker.ResolvedTypes.TryGetValue(member.Object, out var ot) ? ot : null;
+            var resolver = _typeChecker.DotNetResolver;
+            var methodName = DotNetTypeResolver.SnakeToPascal(member.Member);
+
+            // .NET static method: File.read_all_text(...) — don't load the type as a value
+            if (member.Object is IdentifierExpr objIdent && ResolveDotNetType(objIdent.Name) is Type staticType)
+            {
+                foreach (var arg in call.Arguments)
+                    LowerExpression(arg.Value);
+                _currentBlock.Emit(new IrCallDotNetStatic(staticType, methodName, call.Arguments.Count, call.Span));
+                return;
+            }
+
+            // .NET namespace chain: io.File.read_all_text(...)
+            if (member.Object is MemberAccessExpr outerMember &&
+                outerMember.Object is IdentifierExpr nsIdent &&
+                _namespaceAliases.ContainsKey(nsIdent.Name))
+            {
+                var chainType = ResolveDotNetChain(nsIdent.Name, outerMember.Member);
+                if (chainType is not null)
+                {
+                    foreach (var arg in call.Arguments)
+                        LowerExpression(arg.Value);
+                    _currentBlock.Emit(new IrCallDotNetStatic(chainType, methodName, call.Arguments.Count, call.Span));
+                    return;
+                }
+            }
+
+            // .NET instance method: obj.get_async(...) where obj is a .NET type instance
+            if (objType is DotNetType dotNetObjType)
+            {
+                LowerExpression(member.Object);
+                foreach (var arg in call.Arguments)
+                    LowerExpression(arg.Value);
+                _currentBlock.Emit(new IrCallDotNetInstance(dotNetObjType.ClrBackingType, methodName, call.Arguments.Count, call.Span));
+                return;
+            }
+
+            // Skelvon user-defined type method call
             LowerExpression(member.Object);
             foreach (var arg in call.Arguments)
                 LowerExpression(arg.Value);
 
-            // Determine if this is a call on a known user type
-            var objType = _typeChecker.ResolvedTypes.TryGetValue(member.Object, out var ot) ? ot : null;
-            var typeName = objType?.DisplayName;
-            if (typeName is not null && _knownTypes.Contains(typeName))
+            var typeNameStr = objType?.DisplayName;
+            if (typeNameStr is not null && _knownTypes.Contains(typeNameStr))
             {
-                _currentBlock.Emit(new IrCallMethod(typeName, member.Member, call.Arguments.Count, call.Span));
+                _currentBlock.Emit(new IrCallMethod(typeNameStr, member.Member, call.Arguments.Count, call.Span));
             }
             else
             {
@@ -1308,11 +1416,34 @@ public sealed class IrLowering
         return block.Instructions[^1] is IrReturn;
     }
 
-    private static bool ExpressionLeavesValue(Expression expr)
+    private bool InstructionLeavesValue(IrInstruction instr)
     {
-        // Call expressions that return void don't leave a value
-        // For now, assume most expressions leave a value except calls to known void functions
-        return expr is not CallExpr; // Simplified — calls handled by emitter
+        return instr switch
+        {
+            IrCallBuiltin { Name: "print" } => false, // void
+            IrCallBuiltin => true,
+            IrCall => true, // conservative — may be void but safer to pop
+            IrCallMethod => true,
+            IrCallVirtual { MethodName: "Add" } => false, // List.Add returns void
+            IrCallVirtual => true,
+            IrCallDotNetStatic { DeclaringType: var t, MethodName: var n, ArgCount: var a }
+                => FindDotNetMethodReturnType(t, n, a, true) != typeof(void),
+            IrCallDotNetInstance { DeclaringType: var t, MethodName: var n, ArgCount: var a }
+                => FindDotNetMethodReturnType(t, n, a, false) != typeof(void),
+            IrNewDotNetObj => true,
+            IrNewObj => true,
+            IrStoreLocal or IrStoreField or IrPop or IrNop or IrReturn or IrBranch or IrBranchIf => false,
+            _ => false,
+        };
+    }
+
+    private Type FindDotNetMethodReturnType(Type type, string name, int argCount, bool isStatic)
+    {
+        var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.FlattenHierarchy |
+                    (isStatic ? System.Reflection.BindingFlags.Static : System.Reflection.BindingFlags.Instance);
+        var method = type.GetMethods(flags)
+            .FirstOrDefault(m => m.Name == name && m.GetParameters().Length == argCount && !m.IsGenericMethod);
+        return method?.ReturnType ?? typeof(void);
     }
 
     private static IrBinaryOpKind MapBinaryOp(TokenKind op) => op switch
@@ -1364,6 +1495,59 @@ public sealed class IrLowering
         TokenKind.KwNot => IrUnaryOpKind.LogicalNot,
         _ => IrUnaryOpKind.Negate,
     };
+
+    // ─── .NET Import Processing ───
+
+    private void ProcessFromImport(FromImportStatement fromImport)
+    {
+        var resolver = _typeChecker.DotNetResolver;
+        foreach (var name in fromImport.Names)
+        {
+            var fullTypeName = $"{fromImport.ModulePath}.{name.Name}";
+            var clrType = resolver.ResolveType(fullTypeName);
+            if (clrType is not null)
+            {
+                var symbolName = name.Alias ?? name.Name;
+                _importedDotNetTypes[symbolName] = clrType;
+            }
+        }
+    }
+
+    private void ProcessImport(ImportStatement import)
+    {
+        var resolver = _typeChecker.DotNetResolver;
+        var clrType = resolver.ResolveType(import.ModulePath);
+        if (clrType is not null)
+        {
+            var symbolName = import.Alias ?? clrType.Name;
+            _importedDotNetTypes[symbolName] = clrType;
+        }
+        else
+        {
+            var symbolName = import.Alias ?? import.ModulePath.Split('.')[^1];
+            _namespaceAliases[symbolName] = import.ModulePath;
+        }
+    }
+
+    /// <summary>Check if a name refers to an imported .NET type.</summary>
+    private Type? ResolveDotNetType(string name)
+    {
+        if (_importedDotNetTypes.TryGetValue(name, out var t))
+            return t;
+        return null;
+    }
+
+    /// <summary>Resolve a dotted chain like io.File to a .NET type.</summary>
+    private Type? ResolveDotNetChain(string namespaceName, string typeName)
+    {
+        string ns;
+        if (_namespaceAliases.TryGetValue(namespaceName, out var resolvedNs))
+            ns = resolvedNs;
+        else
+            ns = namespaceName;
+
+        return _typeChecker.DotNetResolver.ResolveType($"{ns}.{typeName}");
+    }
 
     /// <summary>Emit default argument values for missing positional args.</summary>
     private void EmitDefaultArgs(string funcName, int providedArgs, SourceSpan span)

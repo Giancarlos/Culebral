@@ -15,12 +15,15 @@ public sealed class TypeChecker
     private readonly Dictionary<AstNode, SkelvonType> _resolvedTypes = new();
     private string? _currentClassName;
     private readonly HashSet<string> _knownTypeParams = new();
+    private readonly DotNetTypeResolver _dotNetResolver = new();
 
     public TypeChecker(DiagnosticBag diagnostics)
     {
         _diagnostics = diagnostics;
         _currentScope = BuiltinSymbols.CreateGlobalScope();
     }
+
+    public DotNetTypeResolver DotNetResolver => _dotNetResolver;
 
     public IReadOnlyDictionary<AstNode, SkelvonType> ResolvedTypes => _resolvedTypes;
     public SymbolScope GlobalScope => _currentScope;
@@ -425,15 +428,21 @@ public sealed class TypeChecker
                 CheckClass(cls);
                 break;
 
-            case ImportStatement:
-            case FromImportStatement:
+            case FromImportStatement fromImport:
+                CheckFromImport(fromImport);
+                break;
+
+            case ImportStatement import:
+                CheckImport(import);
+                break;
+
             case WhenStatement:
             case BreakStatement:
             case ContinueStatement:
             case PassStatement:
             case YieldStatement:
             case RaiseStatement:
-                break; // Valid but no type checking needed at this stage
+                break;
         }
     }
 
@@ -511,6 +520,64 @@ public sealed class TypeChecker
         _currentScope = loopScope;
         CheckBlock(forStmt.Body);
         _currentScope = prevScope;
+    }
+
+    // ─── .NET Import Resolution ───
+
+    private void CheckFromImport(FromImportStatement fromImport)
+    {
+        var modulePath = fromImport.ModulePath;
+        foreach (var name in fromImport.Names)
+        {
+            var fullTypeName = $"{modulePath}.{name.Name}";
+            var clrType = _dotNetResolver.ResolveType(fullTypeName);
+            if (clrType is not null)
+            {
+                var symbolName = name.Alias ?? name.Name;
+                _currentScope.TryDeclare(new Symbol
+                {
+                    Name = symbolName,
+                    Kind = SymbolKind.DotNetType,
+                    Type = new DotNetType(fullTypeName, clrType),
+                    IsMutable = false,
+                });
+            }
+            else
+            {
+                _diagnostics.Warning("SKV2010",
+                    $"Cannot resolve .NET type '{fullTypeName}'", fromImport.Span);
+            }
+        }
+    }
+
+    private void CheckImport(ImportStatement import)
+    {
+        var modulePath = import.ModulePath;
+
+        // Try as a type first (e.g., import System.Console)
+        var clrType = _dotNetResolver.ResolveType(modulePath);
+        if (clrType is not null)
+        {
+            var symbolName = import.Alias ?? clrType.Name;
+            _currentScope.TryDeclare(new Symbol
+            {
+                Name = symbolName,
+                Kind = SymbolKind.DotNetType,
+                Type = new DotNetType(modulePath, clrType),
+                IsMutable = false,
+            });
+            return;
+        }
+
+        // Otherwise treat as a namespace alias
+        var symbolName2 = import.Alias ?? modulePath.Split('.')[^1];
+        _currentScope.TryDeclare(new Symbol
+        {
+            Name = symbolName2,
+            Kind = SymbolKind.DotNetNamespace,
+            Type = new DotNetNamespaceType(modulePath),
+            IsMutable = false,
+        });
     }
 
     // ─── Type Inference ───
@@ -654,6 +721,33 @@ public sealed class TypeChecker
             var symbol = _currentScope.Lookup(ident.Name);
             if (symbol?.Kind == SymbolKind.Type)
                 return symbol.Type;
+            // .NET type constructor
+            if (symbol?.Kind == SymbolKind.DotNetType && symbol.Type is DotNetType dnt)
+                return dnt;
+        }
+
+        // .NET method call: File.read_all_text(...) or string_var.contains(...)
+        if (call.Callee is MemberAccessExpr memberCall)
+        {
+            var objType = _resolvedTypes.TryGetValue(memberCall.Object, out var ot) ? ot : null;
+
+            // Determine the CLR type for resolution
+            Type? clrType = objType switch
+            {
+                DotNetType dt => dt.ClrBackingType,
+                PrimitiveType pt => pt.ClrType,
+                _ => null,
+            };
+
+            if (clrType is not null)
+            {
+                var method = _dotNetResolver.ResolveMethod(
+                    clrType, memberCall.Member, call.Arguments.Count, isStatic: true)
+                    ?? _dotNetResolver.ResolveMethod(
+                    clrType, memberCall.Member, call.Arguments.Count, isStatic: false);
+                if (method is not null)
+                    return DotNetTypeResolver.ClrTypeToSkelvon(method.ReturnType);
+            }
         }
 
         return PrimitiveType.Object;
@@ -661,8 +755,46 @@ public sealed class TypeChecker
 
     private SkelvonType InferMemberAccess(MemberAccessExpr member)
     {
-        InferType(member.Object);
-        // TODO: resolve member from type's symbol table
+        var objType = InferType(member.Object);
+
+        // .NET type static member access: File.read_all_text
+        if (objType is DotNetType dotNetType)
+        {
+            var clrType = dotNetType.ClrBackingType;
+            var pascalName = DotNetTypeResolver.SnakeToPascal(member.Member);
+
+            // Try property
+            var prop = _dotNetResolver.ResolveProperty(clrType, member.Member, isStatic: true);
+            if (prop is not null)
+                return DotNetTypeResolver.ClrTypeToSkelvon(prop.PropertyType);
+
+            // Try field
+            var field = _dotNetResolver.ResolveField(clrType, member.Member, isStatic: true);
+            if (field is not null)
+                return DotNetTypeResolver.ClrTypeToSkelvon(field.FieldType);
+
+            // Could be a method — return type resolved at call site
+            return PrimitiveType.Object;
+        }
+
+        // .NET instance member access: client.status_code
+        if (objType is DotNetType { ClrBackingType: var instType })
+        {
+            var prop = _dotNetResolver.ResolveProperty(instType, member.Member, isStatic: false);
+            if (prop is not null)
+                return DotNetTypeResolver.ClrTypeToSkelvon(prop.PropertyType);
+            return PrimitiveType.Object;
+        }
+
+        // .NET namespace member: io.File → resolve System.IO.File
+        if (objType is DotNetNamespaceType nsType)
+        {
+            var fullTypeName = $"{nsType.Namespace}.{member.Member}";
+            var clrType = _dotNetResolver.ResolveType(fullTypeName);
+            if (clrType is not null)
+                return new DotNetType(fullTypeName, clrType);
+        }
+
         return PrimitiveType.Object;
     }
 

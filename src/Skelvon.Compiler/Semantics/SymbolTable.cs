@@ -27,6 +27,8 @@ public enum SymbolKind
     Type,
     Module,
     EnumVariant,
+    DotNetType,
+    DotNetNamespace,
 }
 
 /// <summary>

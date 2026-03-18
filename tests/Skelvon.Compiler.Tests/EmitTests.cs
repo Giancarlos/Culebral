@@ -846,6 +846,164 @@ public class EmitTests : IDisposable
         Assert.Equal("42\nworld", output);
     }
 
+    // ─── Phase 3: .NET Interop Tests ───
+
+    [Fact]
+    public void DotNet_StaticMethod_SnakeCase()
+    {
+        File.WriteAllText(Path.Combine(_tempDir, "data.txt"), "interop works");
+        var output = CompileAndRun($$"""
+            from System.IO import File
+
+            def main():
+                content = File.read_all_text("{{Path.Combine(_tempDir, "data.txt")}}")
+                print(content)
+            """);
+        Assert.Equal("interop works", output);
+    }
+
+    [Fact]
+    public void DotNet_StaticMethod_PascalCase()
+    {
+        File.WriteAllText(Path.Combine(_tempDir, "data.txt"), "pascal works");
+        var output = CompileAndRun($$"""
+            from System.IO import File
+
+            def main():
+                content = File.ReadAllText("{{Path.Combine(_tempDir, "data.txt")}}")
+                print(content)
+            """);
+        Assert.Equal("pascal works", output);
+    }
+
+    [Fact]
+    public void DotNet_NamespaceAlias()
+    {
+        File.WriteAllText(Path.Combine(_tempDir, "ns.txt"), "namespace alias");
+        var output = CompileAndRun($$"""
+            import System.IO as io
+
+            def main():
+                content = io.File.read_all_text("{{Path.Combine(_tempDir, "ns.txt")}}")
+                print(content)
+            """);
+        Assert.Equal("namespace alias", output);
+    }
+
+    [Fact]
+    public void DotNet_MathStaticMethods()
+    {
+        var output = CompileAndRun("""
+            from System import Math
+
+            def main():
+                print(Math.max(10, 20))
+                print(Math.min(10, 20))
+                print(Math.abs(-42))
+            """);
+        Assert.Equal("20\n10\n42", output);
+    }
+
+    [Fact]
+    public void DotNet_Constructor_And_InstanceMethods()
+    {
+        var output = CompileAndRun("""
+            from System.Text import StringBuilder
+
+            def main():
+                sb = StringBuilder()
+                sb.append("Hello")
+                sb.append(", World!")
+                print(sb.to_string())
+            """);
+        Assert.Equal("Hello, World!", output);
+    }
+
+    [Fact]
+    public void DotNet_FileWriteAndRead()
+    {
+        var filePath = Path.Combine(_tempDir, "written.txt");
+        var output = CompileAndRun($$"""
+            from System.IO import File
+
+            def main():
+                File.write_all_text("{{filePath}}", "written by skelvon")
+                content = File.read_all_text("{{filePath}}")
+                print(content)
+            """);
+        Assert.Equal("written by skelvon", output);
+    }
+
+    [Fact]
+    public void DotNet_EnvironmentVariable()
+    {
+        var output = CompileAndRun("""
+            from System import Environment
+
+            def main():
+                home = Environment.get_environment_variable("HOME")
+                print(home)
+            """);
+        Assert.False(string.IsNullOrEmpty(output));
+    }
+
+    [Fact]
+    public void DotNet_StringInstanceMethods()
+    {
+        var output = CompileAndRun("""
+            def main():
+                s = "Hello, World!"
+                print(s.to_upper())
+                print(s.to_lower())
+                print(s.contains("World"))
+                print(s.replace("World", "Skelvon"))
+            """);
+        Assert.Equal("HELLO, WORLD!\nhello, world!\nTrue\nHello, Skelvon!", output);
+    }
+
+    [Fact]
+    public void DotNet_StringStartsWith()
+    {
+        var output = CompileAndRun("""
+            def main():
+                s = "Hello, World!"
+                print(s.starts_with("Hello"))
+                print(s.ends_with("World!"))
+                print(s.trim())
+            """);
+        Assert.Equal("True\nTrue\nHello, World!", output);
+    }
+
+    [Fact]
+    public void DotNet_MultipleImports()
+    {
+        var filePath = Path.Combine(_tempDir, "multi.txt");
+        File.WriteAllText(filePath, "multi import test");
+        var output = CompileAndRun($$"""
+            from System.IO import File, Path
+
+            def main():
+                content = File.read_all_text("{{filePath}}")
+                ext = Path.get_extension("test.txt")
+                print(content)
+                print(ext)
+            """);
+        Assert.Equal("multi import test\n.txt", output);
+    }
+
+    [Fact]
+    public void DotNet_CaseBridging_BothDirections()
+    {
+        var output = CompileAndRun("""
+            from System import Math
+
+            def main():
+                print(Math.max(5, 10))
+                print(Math.Max(5, 10))
+            """);
+        Assert.Equal("10\n10", output);
+    }
+
     [Fact]
     public void CompilationDiagnostics_ReportErrors()
     {

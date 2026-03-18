@@ -127,6 +127,22 @@ public sealed record TypeParameterType(string Name) : SkelvonType
     public override Type? ClrType => null;
 }
 
+// ─── .NET Interop Types ───
+
+/// <summary>A .NET type imported via 'from System.IO import File'.</summary>
+public sealed record DotNetType(string FullName, Type ClrBackingType) : SkelvonType
+{
+    public override string DisplayName => ClrBackingType.Name;
+    public override Type ClrType => ClrBackingType;
+}
+
+/// <summary>A .NET namespace alias via 'import System.IO as io'.</summary>
+public sealed record DotNetNamespaceType(string Namespace) : SkelvonType
+{
+    public override string DisplayName => Namespace;
+    public override Type? ClrType => null;
+}
+
 // ─── Error / Unknown ───
 
 public sealed record ErrorType(string Reason) : SkelvonType
