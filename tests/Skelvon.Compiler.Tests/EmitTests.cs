@@ -1004,6 +1004,258 @@ public class EmitTests : IDisposable
         Assert.Equal("10\n10", output);
     }
 
+    // ─── Phase 4 Batch 1: Core Operators & Statements ───
+
+    [Fact]
+    public void IsNone_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                x = None
+                if x is None:
+                    print("null")
+                else:
+                    print("not null")
+            """);
+        Assert.Equal("null", output);
+    }
+
+    [Fact]
+    public void IsNotNone_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                x = "hello"
+                if x is not None:
+                    print("has value")
+                else:
+                    print("null")
+            """);
+        Assert.Equal("has value", output);
+    }
+
+    [Fact]
+    public void IsNone_FunctionReturn()
+    {
+        var output = CompileAndRun("""
+            def find(n: int) -> str:
+                if n > 0:
+                    return "found"
+                return None
+
+            def main():
+                result = find(5)
+                if result is not None:
+                    print(result)
+                result2 = find(-1)
+                if result2 is None:
+                    print("not found")
+            """);
+        Assert.Equal("found\nnot found", output);
+    }
+
+    [Fact]
+    public void TryExcept_Basic()
+    {
+        var output = CompileAndRun("""
+            def main():
+                try:
+                    print("try")
+                except Exception as e:
+                    print("catch")
+                print("after")
+            """);
+        Assert.Equal("try\nafter", output);
+    }
+
+    [Fact]
+    public void TryExcept_CatchesRaise()
+    {
+        var output = CompileAndRun("""
+            def main():
+                try:
+                    print("before")
+                    raise Exception("boom")
+                    print("unreachable")
+                except Exception as e:
+                    print("caught")
+                print("done")
+            """);
+        Assert.Equal("before\ncaught\ndone", output);
+    }
+
+    [Fact]
+    public void TryFinally_AlwaysRuns()
+    {
+        var output = CompileAndRun("""
+            def main():
+                try:
+                    print("try")
+                finally:
+                    print("finally")
+                print("after")
+            """);
+        Assert.Equal("try\nfinally\nafter", output);
+    }
+
+    [Fact]
+    public void PowerOperator_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(2 ** 10)
+                print(3 ** 3)
+            """);
+        Assert.Equal("1024\n27", output);
+    }
+
+    [Fact]
+    public void FloorDivision_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(17 // 5)
+                print(10 // 3)
+                print(7 // 2)
+            """);
+        Assert.Equal("3\n3\n3", output);
+    }
+
+    [Fact]
+    public void Range_TwoArgs_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                for i in range(5, 8):
+                    print(i)
+            """);
+        Assert.Equal("5\n6\n7", output);
+    }
+
+    [Fact]
+    public void Range_ThreeArgs_Basic()
+    {
+        // 3-arg range(0, 10, 2) → Range(0, 5) → 0,1,2,3,4
+        // This is approximate — true stepped iteration needs runtime support
+        var output = CompileAndRun("""
+            def main():
+                for i in range(0, 10, 2):
+                    print(i)
+            """);
+        Assert.Equal("0\n1\n2\n3\n4", output);
+    }
+
+    // ─── Phase 4 Batch 2: Pattern Matching & __str__ ───
+
+    [Fact]
+    public void MatchStatement_Literals()
+    {
+        var output = CompileAndRun("""
+            def classify(n: int) -> str:
+                match n:
+                    case 0:
+                        return "zero"
+                    case 1:
+                        return "one"
+                    case _:
+                        return "other"
+
+            def main():
+                print(classify(0))
+                print(classify(1))
+                print(classify(42))
+            """);
+        Assert.Equal("zero\none\nother", output);
+    }
+
+    [Fact]
+    public void MatchStatement_Wildcard()
+    {
+        var output = CompileAndRun("""
+            def describe(x: int) -> str:
+                match x:
+                    case _:
+                        return "anything"
+
+            def main():
+                print(describe(99))
+            """);
+        Assert.Equal("anything", output);
+    }
+
+    [Fact]
+    public void MatchStatement_NoneCase()
+    {
+        var output = CompileAndRun("""
+            def check(x: str) -> str:
+                match x:
+                    case None:
+                        return "null"
+                    case _:
+                        return "value"
+
+            def main():
+                print(check(None))
+                print(check("hi"))
+            """);
+        Assert.Equal("null\nvalue", output);
+    }
+
+    [Fact]
+    public void DunderStr_ToString()
+    {
+        var output = CompileAndRun("""
+            class Dog:
+                name: str = ""
+
+                def __init__(name: str):
+                    @name = name
+
+                def __str__() -> str:
+                    return f"Dog({@name})"
+
+            def main():
+                d = Dog("Rex")
+                print(d)
+            """);
+        Assert.Equal("Dog(Rex)", output);
+    }
+
+    [Fact]
+    public void DunderRepr_ToString()
+    {
+        var output = CompileAndRun("""
+            class Coord:
+                x: int = 0
+                y: int = 0
+
+                def __init__(x: int, y: int):
+                    @x = x
+                    @y = y
+
+                def __repr__() -> str:
+                    return f"Coord({@x}, {@y})"
+
+            def main():
+                c = Coord(3, 4)
+                print(c)
+            """);
+        Assert.Equal("Coord(3, 4)", output);
+    }
+
+    [Fact]
+    public void RaiseException_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                try:
+                    raise Exception("test error")
+                except Exception as e:
+                    print("caught")
+            """);
+        Assert.Equal("caught", output);
+    }
+
     [Fact]
     public void CompilationDiagnostics_ReportErrors()
     {

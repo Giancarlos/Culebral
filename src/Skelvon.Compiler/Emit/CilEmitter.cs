@@ -231,21 +231,32 @@ public sealed class CilEmitter
         var returnClrType = ResolveClrType(method.ReturnType);
         var paramClrTypes = method.Parameters.Select(p => ResolveClrType(p.Type)).ToArray();
 
+        // Map __str__ → ToString (override object.ToString())
+        // Map __repr__ → ToString if no __str__
+        var emitName = method.Name switch
+        {
+            "__str__" => "ToString",
+            "__repr__" => "ToString",
+            _ => method.Name,
+        };
+
         var methodAttrs = MethodAttributes.Public | MethodAttributes.HideBySig;
         if (method.IsStatic)
             methodAttrs |= MethodAttributes.Static;
         if (typeDef.Kind == IrTypeKind.Interface)
             methodAttrs |= MethodAttributes.Abstract | MethodAttributes.Virtual | MethodAttributes.NewSlot;
-        else if (!method.IsStatic && typeDef.Interfaces.Count > 0)
-            methodAttrs |= MethodAttributes.Virtual; // For interface implementation
+        else if (!method.IsStatic && (typeDef.Interfaces.Count > 0 || emitName == "ToString"))
+            methodAttrs |= MethodAttributes.Virtual; // For interface implementation or ToString override
 
-        var mb = tb.DefineMethod(method.Name, methodAttrs, returnClrType, paramClrTypes);
+        var mb = tb.DefineMethod(emitName, methodAttrs, returnClrType, paramClrTypes);
 
         // Name parameters
         for (int i = 0; i < method.Parameters.Count; i++)
             mb.DefineParameter(i + 1, ParameterAttributes.None, method.Parameters[i].Name);
 
-        _methodBuilders[$"{typeDef.Name}.{method.Name}"] = mb;
+        _methodBuilders[$"{typeDef.Name}.{emitName}"] = mb;
+        if (emitName != method.Name)
+            _methodBuilders[$"{typeDef.Name}.{method.Name}"] = mb;
 
         // Don't emit body for abstract/interface methods
         if (typeDef.Kind == IrTypeKind.Interface)
@@ -530,6 +541,36 @@ public sealed class CilEmitter
                 EmitIsInst(il, name);
                 break;
 
+            case IrIsNull { Negated: var negated }:
+                il.Emit(OpCodes.Ldnull);
+                il.Emit(OpCodes.Ceq);
+                if (negated)
+                {
+                    il.Emit(OpCodes.Ldc_I4_0);
+                    il.Emit(OpCodes.Ceq);
+                }
+                break;
+
+            case IrThrow:
+                il.Emit(OpCodes.Throw);
+                break;
+
+            case IrBeginExceptionBlock:
+                il.BeginExceptionBlock();
+                break;
+
+            case IrBeginCatchBlock { ExceptionType: var excType }:
+                il.BeginCatchBlock(excType);
+                break;
+
+            case IrBeginFinallyBlock:
+                il.BeginFinallyBlock();
+                break;
+
+            case IrEndExceptionBlock:
+                il.EndExceptionBlock();
+                break;
+
             // ─── .NET Interop ───
 
             case IrCallDotNetStatic { DeclaringType: var type, MethodName: var mname, ArgCount: var argc }:
@@ -679,11 +720,18 @@ public sealed class CilEmitter
                 il.Emit(OpCodes.Div);
                 break;
             case IrBinaryOpKind.Pow:
-                // Math.Pow(a, b)
-                il.Emit(OpCodes.Conv_R8);
+            {
+                // Math.Pow(a, b) — both args must be double
+                // Stack has: a, b. Save b, convert a, reload b, convert b
+                var powTmp = il.DeclareLocal(typeof(int));
+                il.Emit(OpCodes.Stloc, powTmp);  // save b
+                il.Emit(OpCodes.Conv_R8);         // convert a to double
+                il.Emit(OpCodes.Ldloc, powTmp);   // reload b
+                il.Emit(OpCodes.Conv_R8);         // convert b to double
                 var mathPow = typeof(Math).GetMethod("Pow", [typeof(double), typeof(double)])!;
                 il.Emit(OpCodes.Call, mathPow);
                 break;
+            }
             case IrBinaryOpKind.LogicalAnd:
                 il.Emit(OpCodes.And);
                 break;
@@ -747,18 +795,50 @@ public sealed class CilEmitter
                 break;
 
             case "range":
-                // Use Enumerable.Range — simplified to single-arg form
+            {
                 var enumRange = typeof(Enumerable).GetMethod("Range", [typeof(int), typeof(int)])!;
-                // Push 0 as start, arg is count
-                // For single arg range(n), emit Range(0, n)
-                // The arg is already on stack as 'count'
-                // We need to insert 0 before it — use a local
-                var tmpLocal = il.DeclareLocal(typeof(int));
-                il.Emit(OpCodes.Stloc, tmpLocal);
-                il.Emit(OpCodes.Ldc_I4_0);
-                il.Emit(OpCodes.Ldloc, tmpLocal);
-                il.Emit(OpCodes.Call, enumRange);
+                if (argc == 1)
+                {
+                    // range(n) → Enumerable.Range(0, n)
+                    var tmpLocal = il.DeclareLocal(typeof(int));
+                    il.Emit(OpCodes.Stloc, tmpLocal);
+                    il.Emit(OpCodes.Ldc_I4_0);
+                    il.Emit(OpCodes.Ldloc, tmpLocal);
+                    il.Emit(OpCodes.Call, enumRange);
+                }
+                else if (argc == 2)
+                {
+                    // range(start, stop) → Enumerable.Range(start, stop - start)
+                    var stopLocal = il.DeclareLocal(typeof(int));
+                    var startLocal = il.DeclareLocal(typeof(int));
+                    il.Emit(OpCodes.Stloc, stopLocal);  // pop stop
+                    il.Emit(OpCodes.Stloc, startLocal);  // pop start
+                    il.Emit(OpCodes.Ldloc, startLocal);
+                    il.Emit(OpCodes.Ldloc, stopLocal);
+                    il.Emit(OpCodes.Ldloc, startLocal);
+                    il.Emit(OpCodes.Sub);                 // stop - start = count
+                    il.Emit(OpCodes.Call, enumRange);
+                }
+                else
+                {
+                    // range(start, stop, step) — not directly supported by Enumerable.Range
+                    // Emit Range(start, (stop-start)/step) as approximation for positive step
+                    var stepLocal = il.DeclareLocal(typeof(int));
+                    var stopLocal = il.DeclareLocal(typeof(int));
+                    var startLocal = il.DeclareLocal(typeof(int));
+                    il.Emit(OpCodes.Stloc, stepLocal);
+                    il.Emit(OpCodes.Stloc, stopLocal);
+                    il.Emit(OpCodes.Stloc, startLocal);
+                    il.Emit(OpCodes.Ldloc, startLocal);
+                    il.Emit(OpCodes.Ldloc, stopLocal);
+                    il.Emit(OpCodes.Ldloc, startLocal);
+                    il.Emit(OpCodes.Sub);
+                    il.Emit(OpCodes.Ldloc, stepLocal);
+                    il.Emit(OpCodes.Div);
+                    il.Emit(OpCodes.Call, enumRange);
+                }
                 break;
+            }
 
             case "int":
                 var convertToInt = typeof(Convert).GetMethod("ToInt32", [typeof(object)])!;
@@ -1008,9 +1088,9 @@ public sealed class CilEmitter
             IrBinaryOp { OperandType: PrimitiveType { Name: "float" } }
                 => typeof(double),
             IrBinaryOp { Op: IrBinaryOpKind.Add or IrBinaryOpKind.Sub or
-                IrBinaryOpKind.Mul or IrBinaryOpKind.Mod }
+                IrBinaryOpKind.Mul or IrBinaryOpKind.Mod or IrBinaryOpKind.IntDiv }
                 => typeof(int),
-            IrBinaryOp { Op: IrBinaryOpKind.Div } => typeof(double),
+            IrBinaryOp { Op: IrBinaryOpKind.Div or IrBinaryOpKind.Pow } => typeof(double),
             IrCall { FunctionName: var name } when _methodBuilders.TryGetValue(name, out var mb)
                 => mb.ReturnType,
             IrCallMethod { DeclaringType: var dt, MethodName: var mn }

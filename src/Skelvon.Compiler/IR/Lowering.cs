@@ -629,7 +629,15 @@ public sealed class IrLowering
             case RaiseStatement raise:
                 if (raise.Value is not null)
                     LowerExpression(raise.Value);
-                // TODO: emit throw instruction
+                _currentBlock.Emit(new IrThrow(raise.Span));
+                break;
+
+            case TryStatement tryStmt:
+                LowerTryStatement(tryStmt);
+                break;
+
+            case MatchStatement matchStmt:
+                LowerMatchStatement(matchStmt);
                 break;
 
             case FromImportStatement fromImport:
@@ -1097,6 +1105,14 @@ public sealed class IrLowering
                 LowerListComprehension(comp);
                 break;
 
+            case IsExpr isExpr:
+                LowerIsExpr(isExpr);
+                break;
+
+            case InExpr inExpr:
+                LowerInExpr(inExpr);
+                break;
+
             default:
                 _currentBlock.Emit(new IrLoadNull(expr.Span));
                 break;
@@ -1380,6 +1396,206 @@ public sealed class IrLowering
         _currentBlock = endBlock;
 
         _currentBlock.Emit(new IrLoadLocal(listLocal.Index, comp.Span));
+    }
+
+    // ─── is / in / try-except / raise / match / lambda / comprehensions ───
+
+    private void LowerIsExpr(IsExpr isExpr)
+    {
+        if (_currentBlock is null) return;
+        LowerExpression(isExpr.Left);
+
+        // is None / is not None
+        if (isExpr.Type is SimpleType { Name: "None" })
+        {
+            _currentBlock.Emit(new IrIsNull(isExpr.Negated, isExpr.Span));
+        }
+        else
+        {
+            // is Type / is not Type — type check via isinst
+            var typeName = isExpr.Type is SimpleType st ? st.Name : "object";
+            _currentBlock.Emit(new IrIsInst(typeName, isExpr.Span));
+            if (isExpr.Negated)
+            {
+                // Negate the result
+                _currentBlock.Emit(new IrUnaryOp(IrUnaryOpKind.LogicalNot, isExpr.Span));
+            }
+        }
+    }
+
+    private void LowerInExpr(InExpr inExpr)
+    {
+        if (_currentBlock is null) return;
+        // x in collection → collection.Contains(x)
+        // Reorder: evaluate collection first (for callvirt), then x
+        LowerExpression(inExpr.Right); // collection
+        LowerExpression(inExpr.Left);  // element
+        _currentBlock.Emit(new IrCallVirtual("Contains", 1, inExpr.Span));
+        if (inExpr.Negated)
+            _currentBlock.Emit(new IrUnaryOp(IrUnaryOpKind.LogicalNot, inExpr.Span));
+    }
+
+    private void LowerTryStatement(TryStatement tryStmt)
+    {
+        if (_currentBlock is null || _currentFunction is null) return;
+
+        // Emit all try/catch/finally instructions into the SAME basic block
+        // This is required because CIL exception handling must be contiguous
+        _currentBlock.Emit(new IrBeginExceptionBlock("", tryStmt.Span));
+
+        // Try body
+        foreach (var stmt in tryStmt.Body.Statements)
+            LowerStatement(stmt);
+
+        // Catch clauses
+        foreach (var except in tryStmt.ExceptClauses)
+        {
+            var excType = typeof(Exception);
+            if (except.ExceptionType is SimpleType st)
+            {
+                var resolved = _typeChecker.DotNetResolver.ResolveType($"System.{st.Name}")
+                    ?? _typeChecker.DotNetResolver.ResolveType(st.Name);
+                if (resolved is not null)
+                    excType = resolved;
+            }
+
+            _currentBlock!.Emit(new IrBeginCatchBlock(excType, except.Span));
+
+            if (except.Variable is not null)
+            {
+                var local = GetOrCreateLocal(except.Variable, except.Span, PrimitiveType.Object);
+                _currentBlock.Emit(new IrStoreLocal(local.Index, except.Span));
+            }
+            else
+            {
+                _currentBlock.Emit(new IrPop(except.Span));
+            }
+
+            foreach (var stmt in except.Body.Statements)
+                LowerStatement(stmt);
+        }
+
+        // Finally
+        if (tryStmt.FinallyBody is not null)
+        {
+            _currentBlock!.Emit(new IrBeginFinallyBlock(tryStmt.Span));
+            foreach (var stmt in tryStmt.FinallyBody.Statements)
+                LowerStatement(stmt);
+        }
+
+        _currentBlock!.Emit(new IrEndExceptionBlock(tryStmt.Span));
+    }
+
+    private void LowerMatchStatement(MatchStatement matchStmt)
+    {
+        if (_currentBlock is null || _currentFunction is null) return;
+
+        var endLabel = NewBlockLabel("match_end");
+        var subjectLocal = CreateLocal("<match_subject>", PrimitiveType.Object);
+
+        // Evaluate subject once and store
+        LowerExpression(matchStmt.Subject);
+        // Box if value type for pattern matching
+        var subjectType = _typeChecker.ResolvedTypes.TryGetValue(matchStmt.Subject, out var st2) ? st2 : null;
+        if (subjectType is PrimitiveType { ClrType.IsValueType: true })
+            _currentBlock.Emit(new IrBox(subjectType, matchStmt.Span));
+        _currentBlock.Emit(new IrStoreLocal(subjectLocal.Index, matchStmt.Span));
+
+        for (int i = 0; i < matchStmt.Cases.Count; i++)
+        {
+            var matchCase = matchStmt.Cases[i];
+            var caseBodyLabel = NewBlockLabel($"case_body_{i}");
+            var nextCaseLabel = i + 1 < matchStmt.Cases.Count
+                ? NewBlockLabel($"case_test_{i + 1}")
+                : endLabel;
+
+            // Emit pattern test
+            switch (matchCase.Pattern)
+            {
+                case WildcardPattern:
+                    // Always matches — jump to body
+                    _currentBlock.Emit(new IrBranch(caseBodyLabel, matchCase.Span));
+                    break;
+
+                case LiteralPattern litPat:
+                    _currentBlock.Emit(new IrLoadLocal(subjectLocal.Index, matchCase.Span));
+                    // Unbox the subject to match the literal type
+                    if (litPat.Literal is IntLiteralExpr)
+                        _currentBlock.Emit(new IrUnbox(PrimitiveType.Int, matchCase.Span));
+                    else if (litPat.Literal is BoolLiteralExpr)
+                        _currentBlock.Emit(new IrUnbox(PrimitiveType.Bool, matchCase.Span));
+                    LowerExpression(litPat.Literal);
+                    _currentBlock.Emit(new IrBinaryOp(IrBinaryOpKind.Equal, null, matchCase.Span));
+                    _currentBlock.Emit(new IrBranchIf(caseBodyLabel, nextCaseLabel, matchCase.Span));
+                    break;
+
+                case NamePattern namePat:
+                    // Bind the subject to the name
+                    var nameLocal = GetOrCreateLocal(namePat.Name, matchCase.Span);
+                    _currentBlock.Emit(new IrLoadLocal(subjectLocal.Index, matchCase.Span));
+                    _currentBlock.Emit(new IrStoreLocal(nameLocal.Index, matchCase.Span));
+                    _currentBlock.Emit(new IrBranch(caseBodyLabel, matchCase.Span));
+                    break;
+
+                case NonePattern:
+                    _currentBlock.Emit(new IrLoadLocal(subjectLocal.Index, matchCase.Span));
+                    _currentBlock.Emit(new IrIsNull(false, matchCase.Span));
+                    _currentBlock.Emit(new IrBranchIf(caseBodyLabel, nextCaseLabel, matchCase.Span));
+                    break;
+
+                default:
+                    // Unsupported pattern — skip to next
+                    _currentBlock.Emit(new IrBranch(nextCaseLabel, matchCase.Span));
+                    break;
+            }
+
+            // Guard
+            if (matchCase.Guard is not null)
+            {
+                // Body label becomes the guard check
+                var guardedBodyLabel = NewBlockLabel($"case_guarded_{i}");
+                var guardBlock = new IrBasicBlock { Label = caseBodyLabel };
+                _currentFunction.Body.Add(guardBlock);
+                _currentBlock = guardBlock;
+
+                LowerExpression(matchCase.Guard);
+                _currentBlock.Emit(new IrBranchIf(guardedBodyLabel, nextCaseLabel, matchCase.Span));
+
+                var guardedBlock = new IrBasicBlock { Label = guardedBodyLabel };
+                _currentFunction.Body.Add(guardedBlock);
+                _currentBlock = guardedBlock;
+            }
+            else
+            {
+                var bodyBlock = new IrBasicBlock { Label = caseBodyLabel };
+                _currentFunction.Body.Add(bodyBlock);
+                _currentBlock = bodyBlock;
+            }
+
+            LowerBlock(matchCase.Body);
+            _currentBlock?.Emit(new IrBranch(endLabel, matchCase.Span));
+
+            // Next case test block
+            if (i + 1 < matchStmt.Cases.Count)
+            {
+                var nextBlock = new IrBasicBlock { Label = nextCaseLabel };
+                _currentFunction.Body.Add(nextBlock);
+                _currentBlock = nextBlock;
+            }
+        }
+
+        var end = new IrBasicBlock { Label = endLabel };
+        _currentFunction.Body.Add(end);
+        _currentBlock = end;
+    }
+
+    private void LowerLambda(LambdaExpr lambda)
+    {
+        if (_currentBlock is null) return;
+        // Emit a delegate using a static method on the Program class
+        // For Phase 4 simplicity: lower to a Func<> or Action<> via a helper method
+        // For now, create a simple wrapper
+        _currentBlock.Emit(new IrLoadNull(lambda.Span)); // TODO: proper delegate emission
     }
 
     // ─── Helpers ───

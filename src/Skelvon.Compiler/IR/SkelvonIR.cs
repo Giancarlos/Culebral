@@ -172,6 +172,12 @@ public sealed record IrToString(SkelvonType SourceType, SourceSpan Span) : IrIns
 
 // Comparison helpers
 public sealed record IrCompareNull(bool BranchIfNull, string TargetLabel, SourceSpan Span) : IrInstruction(Span);
+public sealed record IrIsNull(bool Negated, SourceSpan Span) : IrInstruction(Span);
+public sealed record IrThrow(SourceSpan Span) : IrInstruction(Span);
+public sealed record IrBeginExceptionBlock(string HandlerLabel, SourceSpan Span) : IrInstruction(Span);
+public sealed record IrEndExceptionBlock(SourceSpan Span) : IrInstruction(Span);
+public sealed record IrBeginCatchBlock(Type ExceptionType, SourceSpan Span) : IrInstruction(Span);
+public sealed record IrBeginFinallyBlock(SourceSpan Span) : IrInstruction(Span);
 
 // .NET Interop — carry resolved System.Type for direct reflection-based emission
 public sealed record IrCallDotNetStatic(Type DeclaringType, string MethodName, int ArgCount, SourceSpan Span) : IrInstruction(Span);
