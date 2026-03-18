@@ -78,7 +78,7 @@ public sealed class CilEmitter
                 Type? parent = typeDef.Kind switch
                 {
                     IrTypeKind.Interface => null,
-                    IrTypeKind.Struct => typeof(ValueType),
+                    // Structs are emitted as sealed classes for now; true value-type semantics in Phase 4
                     _ => typeof(object),
                 };
                 tb = _moduleBuilder.DefineType(typeDef.Name, attrs, parent);
@@ -113,7 +113,7 @@ public sealed class CilEmitter
             {
                 EmitConstructor(tb, typeDef.Constructor, typeDef);
             }
-            else if (typeDef.Kind is IrTypeKind.Class or IrTypeKind.SealedClass or IrTypeKind.Record)
+            else if (typeDef.Kind is IrTypeKind.Class or IrTypeKind.SealedClass or IrTypeKind.Record or IrTypeKind.Struct)
             {
                 // Generate a default constructor that initializes fields
                 EmitDefaultConstructor(tb, typeDef);
@@ -156,13 +156,16 @@ public sealed class CilEmitter
 
         var il = cb.GetILGenerator();
 
-        // Call base constructor: this.base..ctor()
-        il.Emit(OpCodes.Ldarg_0);
-        var baseCtor = (typeDef.BaseType is not null && _typeBuilders.TryGetValue(typeDef.BaseType, out var baseType))
-            ? baseType.BaseType?.GetConstructor(Type.EmptyTypes)
-            : typeof(object).GetConstructor(Type.EmptyTypes);
-        if (baseCtor is not null)
-            il.Emit(OpCodes.Call, baseCtor);
+        // Call base constructor
+        if (true) // Structs now emitted as sealed classes, so they chain normally
+        {
+            il.Emit(OpCodes.Ldarg_0);
+            var baseCtor = (typeDef.BaseType is not null && _typeBuilders.TryGetValue(typeDef.BaseType, out var baseType))
+                ? baseType.BaseType?.GetConstructor(Type.EmptyTypes)
+                : typeof(object).GetConstructor(Type.EmptyTypes);
+            if (baseCtor is not null)
+                il.Emit(OpCodes.Call, baseCtor);
+        }
 
         EmitFunctionBody(il, ctor);
     }
@@ -260,8 +263,9 @@ public sealed class CilEmitter
         if (prop.Getter is not null)
         {
             var getterMb = tb.DefineMethod($"get_{prop.Name}",
-                MethodAttributes.Public | MethodAttributes.SpecialName,
+                MethodAttributes.Public | MethodAttributes.SpecialName | MethodAttributes.HideBySig,
                 clrType, Type.EmptyTypes);
+            _methodBuilders[$"{typeDef.Name}.get_{prop.Name}"] = getterMb;
             var il = getterMb.GetILGenerator();
             EmitFunctionBody(il, prop.Getter);
             pb.SetGetMethod(getterMb);
@@ -270,9 +274,10 @@ public sealed class CilEmitter
         if (prop.Setter is not null)
         {
             var setterMb = tb.DefineMethod($"set_{prop.Name}",
-                MethodAttributes.Public | MethodAttributes.SpecialName,
+                MethodAttributes.Public | MethodAttributes.SpecialName | MethodAttributes.HideBySig,
                 typeof(void), [clrType]);
             setterMb.DefineParameter(1, ParameterAttributes.None, "value");
+            _methodBuilders[$"{typeDef.Name}.set_{prop.Name}"] = setterMb;
             var il = setterMb.GetILGenerator();
             EmitFunctionBody(il, prop.Setter);
             pb.SetSetMethod(setterMb);
@@ -777,11 +782,14 @@ public sealed class CilEmitter
         var key = $"{declaringType}.{methodName}";
         if (_methodBuilders.TryGetValue(key, out var mb))
         {
-            il.Emit(OpCodes.Callvirt, mb);
+            // Use Call for non-virtual methods, Callvirt for virtual
+            if (mb.IsVirtual)
+                il.Emit(OpCodes.Callvirt, mb);
+            else
+                il.Emit(OpCodes.Call, mb);
         }
         else
         {
-            // Fallback to generic virtual call
             EmitVirtualCall(il, methodName, argc);
         }
     }
@@ -1039,7 +1047,7 @@ public sealed class CilEmitter
         attrs |= typeDef.Kind switch
         {
             IrTypeKind.Class => TypeAttributes.Class,
-            IrTypeKind.Struct => TypeAttributes.Class, // Struct handled via ValueType base
+            IrTypeKind.Struct => TypeAttributes.Class | TypeAttributes.Sealed,
             IrTypeKind.Record => TypeAttributes.Class | TypeAttributes.Sealed,
             IrTypeKind.Interface => TypeAttributes.Interface | TypeAttributes.Abstract,
             IrTypeKind.SealedClass => TypeAttributes.Class | TypeAttributes.Sealed,

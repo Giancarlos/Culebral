@@ -616,6 +616,146 @@ public class EmitTests : IDisposable
         Assert.Equal("10", output);
     }
 
+    // ─── Phase 2 Completion: Structs, Records, Properties ───
+
+    [Fact]
+    public void StructWithMethods_Works()
+    {
+        var output = CompileAndRun("""
+            struct Point:
+                x: int = 0
+                y: int = 0
+
+                def __init__(x: int, y: int):
+                    @x = x
+                    @y = y
+
+                def sum() -> int:
+                    return @x + @y
+
+            def main():
+                p = Point(3, 7)
+                print(p.sum())
+            """);
+        Assert.Equal("10", output);
+    }
+
+    [Fact]
+    public void RecordWithMethods_Works()
+    {
+        var output = CompileAndRun("""
+            record User:
+                name: str = ""
+                age: int = 0
+
+                def __init__(name: str, age: int):
+                    @name = name
+                    @age = age
+
+                def greet() -> str:
+                    return f"Hi, {@name}"
+
+            def main():
+                u = User("Alice", 30)
+                print(u.greet())
+            """);
+        Assert.Equal("Hi, Alice", output);
+    }
+
+    [Fact]
+    public void PropertyGetter_Works()
+    {
+        var output = CompileAndRun("""
+            class Box:
+                _val: int = 0
+
+                def __init__(v: int):
+                    _val = v
+
+                prop val -> int:
+                    get: return _val
+
+            def main():
+                b = Box(42)
+                print(b.val)
+            """);
+        Assert.Equal("42", output);
+    }
+
+    [Fact]
+    public void PropertyGetterAndSetter_Works()
+    {
+        var output = CompileAndRun("""
+            class Box:
+                _val: int = 0
+
+                def __init__(v: int):
+                    _val = v
+
+                prop val -> int:
+                    get: return _val
+                    set: _val = value
+
+            def main():
+                b = Box(42)
+                print(b.val)
+                b.val = 99
+                print(b.val)
+            """);
+        Assert.Equal("42\n99", output);
+    }
+
+    [Fact]
+    public void ComputedProperty_Works()
+    {
+        var output = CompileAndRun("""
+            class Temperature:
+                _celsius: float = 0.0
+
+                def __init__(c: float):
+                    _celsius = c
+
+                prop celsius -> float:
+                    get: return _celsius
+                    set: _celsius = value
+
+                prop fahrenheit -> float:
+                    get: return _celsius * 1.8 + 32.0
+
+            def main():
+                t = Temperature(100.0)
+                print(t.celsius)
+                print(t.fahrenheit)
+                t.celsius = 0.0
+                print(t.fahrenheit)
+            """);
+        Assert.Equal("100\n212\n32", output);
+    }
+
+    [Fact]
+    public void StructMultipleInstances_Works()
+    {
+        var output = CompileAndRun("""
+            struct Vec2:
+                x: int = 0
+                y: int = 0
+
+                def __init__(x: int, y: int):
+                    @x = x
+                    @y = y
+
+                def magnitude_sq() -> int:
+                    return @x * @x + @y * @y
+
+            def main():
+                a = Vec2(3, 4)
+                b = Vec2(5, 12)
+                print(a.magnitude_sq())
+                print(b.magnitude_sq())
+            """);
+        Assert.Equal("25\n169", output);
+    }
+
     [Fact]
     public void CompilationDiagnostics_ReportErrors()
     {

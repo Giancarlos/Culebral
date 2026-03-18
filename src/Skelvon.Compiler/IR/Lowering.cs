@@ -33,6 +33,9 @@ public sealed class IrLowering
     // Store function definitions for default parameter lookup
     private readonly Dictionary<string, FunctionDef> _functionDefs = new();
 
+    // Store lowered type definitions for property/field resolution
+    private readonly Dictionary<string, IrTypeDef> _typeDefs = new();
+
     public IrLowering(DiagnosticBag diagnostics, TypeChecker typeChecker)
     {
         _diagnostics = diagnostics;
@@ -59,20 +62,36 @@ public sealed class IrLowering
             switch (node)
             {
                 case ClassDef cls:
-                    module.Types.Add(LowerClass(cls));
+                {
+                    var td = LowerClass(cls);
+                    module.Types.Add(td);
+                    _typeDefs[cls.Name] = td;
                     break;
+                }
                 case StructDef strct:
-                    module.Types.Add(LowerStruct(strct));
+                {
+                    var td = LowerStruct(strct);
+                    module.Types.Add(td);
+                    _typeDefs[strct.Name] = td;
                     break;
+                }
                 case RecordDef rec:
-                    module.Types.Add(LowerRecord(rec));
+                {
+                    var td = LowerRecord(rec);
+                    module.Types.Add(td);
+                    _typeDefs[rec.Name] = td;
                     break;
+                }
                 case EnumDef enumDef:
                     module.Types.AddRange(LowerEnum(enumDef));
                     break;
                 case InterfaceDef iface:
-                    module.Types.Add(LowerInterface(iface));
+                {
+                    var td = LowerInterface(iface);
+                    module.Types.Add(td);
+                    _typeDefs[iface.Name] = td;
                     break;
+                }
             }
         }
 
@@ -247,16 +266,27 @@ public sealed class IrLowering
         var typeDef = new IrTypeDef { Name = strct.Name, Kind = IrTypeKind.Struct };
         _currentTypeDef = typeDef;
 
+        // Collect fields first
+        foreach (var member in strct.Members)
+        {
+            if (member is FieldDeclaration field)
+            {
+                typeDef.Fields.Add(new IrField
+                {
+                    Name = field.Name,
+                    Type = _typeChecker.ResolveTypeAnnotation(field.Type),
+                    DefaultValue = field.Default is not null ? LowerFieldDefault(field.Default) : null,
+                });
+            }
+        }
+
+        // Methods and constructor
         foreach (var member in strct.Members)
         {
             switch (member)
             {
-                case FieldDeclaration field:
-                    typeDef.Fields.Add(new IrField
-                    {
-                        Name = field.Name,
-                        Type = _typeChecker.ResolveTypeAnnotation(field.Type),
-                    });
+                case FunctionDef { Name: "__init__" } initMethod:
+                    typeDef.Constructor = LowerConstructor(initMethod, strct.Name, typeDef);
                     break;
                 case FunctionDef method:
                     typeDef.Methods.Add(LowerMethod(method, strct.Name));
@@ -623,7 +653,8 @@ public sealed class IrLowering
                      _currentTypeDef.Fields.Any(f => f.Name == ident.Name))
             {
                 // Bare name assignment to a field: count = value → this.count = value
-                var tempLocal = CreateLocal("<field_tmp>", PrimitiveType.Object);
+                var fieldType = _currentTypeDef.Fields.First(f => f.Name == ident.Name).Type;
+                var tempLocal = CreateLocal($"<field_tmp_{ident.Name}>", fieldType);
                 _currentBlock.Emit(new IrStoreLocal(tempLocal.Index, assign.Span));
                 _currentBlock.Emit(new IrLoadThis(assign.Span));
                 _currentBlock.Emit(new IrLoadLocal(tempLocal.Index, assign.Span));
@@ -642,11 +673,10 @@ public sealed class IrLowering
         else if (assign.Target is FieldAccessExpr field)
         {
             // @field = value → this.field = value
-            // Value is on stack, but stfld needs: this, value
-            // So we need to reorder: store value in temp, load this, load temp, stfld
-            if (_currentDeclaringType is not null)
+            if (_currentDeclaringType is not null && _currentTypeDef is not null)
             {
-                var tempLocal = CreateLocal("<field_tmp>", PrimitiveType.Object);
+                var fType = _currentTypeDef.Fields.FirstOrDefault(f => f.Name == field.FieldName)?.Type ?? PrimitiveType.Object;
+                var tempLocal = CreateLocal($"<field_tmp_{field.FieldName}>", fType);
                 _currentBlock.Emit(new IrStoreLocal(tempLocal.Index, assign.Span));
                 _currentBlock.Emit(new IrLoadThis(assign.Span));
                 _currentBlock.Emit(new IrLoadLocal(tempLocal.Index, assign.Span));
@@ -655,13 +685,30 @@ public sealed class IrLowering
         }
         else if (assign.Target is MemberAccessExpr member)
         {
-            // obj.field = value → value already on stack, need: obj, value, stfld
-            var tempLocal = CreateLocal("<member_tmp>", PrimitiveType.Object);
-            _currentBlock.Emit(new IrStoreLocal(tempLocal.Index, assign.Span));
-            LowerExpression(member.Object);
-            _currentBlock.Emit(new IrLoadLocal(tempLocal.Index, assign.Span));
             var objType = _typeChecker.ResolvedTypes.TryGetValue(member.Object, out var ot) ? ot : null;
-            _currentBlock.Emit(new IrStoreField(objType?.DisplayName ?? "object", member.Member, assign.Span));
+            var typeName = objType?.DisplayName ?? "object";
+
+            // Check if this is a property assignment (needs setter call)
+            if (_typeDefs.TryGetValue(typeName, out var memberTypeDef) &&
+                memberTypeDef.Properties.Any(p => p.Name == member.Member))
+            {
+                // value on stack → save, load obj, load value, call setter
+                var propType = memberTypeDef.Properties.First(p => p.Name == member.Member).Type;
+                var tempLocal = CreateLocal("<prop_tmp>", propType);
+                _currentBlock.Emit(new IrStoreLocal(tempLocal.Index, assign.Span));
+                LowerExpression(member.Object);
+                _currentBlock.Emit(new IrLoadLocal(tempLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrCallMethod(typeName, $"set_{member.Member}", 1, assign.Span));
+            }
+            else
+            {
+                // obj.field = value → value already on stack, need: obj, value, stfld
+                var tempLocal = CreateLocal("<member_tmp>", PrimitiveType.Object);
+                _currentBlock.Emit(new IrStoreLocal(tempLocal.Index, assign.Span));
+                LowerExpression(member.Object);
+                _currentBlock.Emit(new IrLoadLocal(tempLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrStoreField(typeName, member.Member, assign.Span));
+            }
         }
     }
 
@@ -936,10 +983,19 @@ public sealed class IrLowering
             case MemberAccessExpr member:
             {
                 LowerExpression(member.Object);
-                // Determine the type of the object to resolve the field
                 var objType = _typeChecker.ResolvedTypes.TryGetValue(member.Object, out var ot) ? ot : null;
                 var typeName = objType?.DisplayName ?? "object";
-                _currentBlock.Emit(new IrLoadField(typeName, member.Member, expr.Span));
+
+                // Check if this is a property access (needs getter call instead of field load)
+                if (_typeDefs.TryGetValue(typeName, out var memberTypeDef) &&
+                    memberTypeDef.Properties.Any(p => p.Name == member.Member))
+                {
+                    _currentBlock.Emit(new IrCallMethod(typeName, $"get_{member.Member}", 0, expr.Span));
+                }
+                else
+                {
+                    _currentBlock.Emit(new IrLoadField(typeName, member.Member, expr.Span));
+                }
                 break;
             }
 
