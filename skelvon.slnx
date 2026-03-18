@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Skelvon.Compiler/Skelvon.Compiler.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Skelvon.Compiler.Tests/Skelvon.Compiler.Tests.csproj" />
+  </Folder>
+</Solution>
