@@ -25,6 +25,7 @@ public sealed class CilEmitter
     private readonly Dictionary<string, TypeBuilder> _typeBuilders = new();
     private readonly Dictionary<string, MethodBuilder> _methodBuilders = new();
     private readonly Dictionary<string, FieldBuilder> _fieldBuilders = new();
+    private readonly Dictionary<string, ConstructorBuilder> _constructorBuilders = new();
     private MethodBuilder? _entryPointMethod;
 
     public CilEmitter(DiagnosticBag diagnostics, string outputPath)
@@ -74,14 +75,19 @@ public sealed class CilEmitter
             }
             else
             {
-                tb = _moduleBuilder.DefineType(typeDef.Name, attrs,
-                    typeDef.Kind == IrTypeKind.Struct ? typeof(ValueType) : typeof(object));
+                Type? parent = typeDef.Kind switch
+                {
+                    IrTypeKind.Interface => null,
+                    IrTypeKind.Struct => typeof(ValueType),
+                    _ => typeof(object),
+                };
+                tb = _moduleBuilder.DefineType(typeDef.Name, attrs, parent);
             }
 
             _typeBuilders[typeDef.Name] = tb;
         }
 
-        // Second pass: define fields, methods, properties
+        // Second pass: define fields, constructors, methods, properties
         foreach (var typeDef in module.Types)
         {
             var tb = _typeBuilders[typeDef.Name];
@@ -100,6 +106,17 @@ public sealed class CilEmitter
                 var fb = tb.DefineField(field.Name, clrType,
                     field.IsStatic ? FieldAttributes.Public | FieldAttributes.Static : FieldAttributes.Public);
                 _fieldBuilders[$"{typeDef.Name}.{field.Name}"] = fb;
+            }
+
+            // Constructor
+            if (typeDef.Constructor is not null && typeDef.Kind is not IrTypeKind.Interface)
+            {
+                EmitConstructor(tb, typeDef.Constructor, typeDef);
+            }
+            else if (typeDef.Kind is IrTypeKind.Class or IrTypeKind.SealedClass or IrTypeKind.Record)
+            {
+                // Generate a default constructor that initializes fields
+                EmitDefaultConstructor(tb, typeDef);
             }
 
             // Methods
@@ -122,16 +139,102 @@ public sealed class CilEmitter
         }
     }
 
+    private void EmitConstructor(TypeBuilder tb, IrFunction ctor, IrTypeDef typeDef)
+    {
+        // Parameter types (excluding 'this' which is implicit in .ctor)
+        var paramClrTypes = ctor.Parameters.Select(p => ResolveClrType(p.Type)).ToArray();
+
+        var cb = tb.DefineConstructor(
+            MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName,
+            CallingConventions.Standard,
+            paramClrTypes);
+
+        for (int i = 0; i < ctor.Parameters.Count; i++)
+            cb.DefineParameter(i + 1, ParameterAttributes.None, ctor.Parameters[i].Name);
+
+        _constructorBuilders[typeDef.Name] = cb;
+
+        var il = cb.GetILGenerator();
+
+        // Call base constructor: this.base..ctor()
+        il.Emit(OpCodes.Ldarg_0);
+        var baseCtor = (typeDef.BaseType is not null && _typeBuilders.TryGetValue(typeDef.BaseType, out var baseType))
+            ? baseType.BaseType?.GetConstructor(Type.EmptyTypes)
+            : typeof(object).GetConstructor(Type.EmptyTypes);
+        if (baseCtor is not null)
+            il.Emit(OpCodes.Call, baseCtor);
+
+        EmitFunctionBody(il, ctor);
+    }
+
+    private void EmitDefaultConstructor(TypeBuilder tb, IrTypeDef typeDef)
+    {
+        var cb = tb.DefineConstructor(
+            MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName,
+            CallingConventions.Standard,
+            Type.EmptyTypes);
+
+        _constructorBuilders[typeDef.Name] = cb;
+
+        var il = cb.GetILGenerator();
+
+        // Call base constructor
+        il.Emit(OpCodes.Ldarg_0);
+        var baseCtor = typeof(object).GetConstructor(Type.EmptyTypes)!;
+        il.Emit(OpCodes.Call, baseCtor);
+
+        // Initialize fields with defaults
+        foreach (var field in typeDef.Fields)
+        {
+            var key = $"{typeDef.Name}.{field.Name}";
+            if (_fieldBuilders.TryGetValue(key, out var fb) && field.DefaultValue is not null)
+            {
+                il.Emit(OpCodes.Ldarg_0); // this
+                EmitConstantInstruction(il, field.DefaultValue);
+                il.Emit(OpCodes.Stfld, fb);
+            }
+        }
+
+        il.Emit(OpCodes.Ret);
+    }
+
+    private static void EmitConstantInstruction(ILGenerator il, IrInstruction instr)
+    {
+        switch (instr)
+        {
+            case IrLoadInt { Value: var v } when v >= int.MinValue && v <= int.MaxValue:
+                il.Emit(OpCodes.Ldc_I4, (int)v);
+                break;
+            case IrLoadFloat { Value: var v }:
+                il.Emit(OpCodes.Ldc_R8, v);
+                break;
+            case IrLoadString { Value: var v }:
+                il.Emit(OpCodes.Ldstr, v);
+                break;
+            case IrLoadBool { Value: var v }:
+                il.Emit(v ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
+                break;
+            case IrLoadNull:
+                il.Emit(OpCodes.Ldnull);
+                break;
+            default:
+                il.Emit(OpCodes.Ldc_I4_0); // Fallback
+                break;
+        }
+    }
+
     private void EmitMethod(TypeBuilder tb, IrFunction method, IrTypeDef typeDef)
     {
         var returnClrType = ResolveClrType(method.ReturnType);
         var paramClrTypes = method.Parameters.Select(p => ResolveClrType(p.Type)).ToArray();
 
-        var methodAttrs = MethodAttributes.Public;
+        var methodAttrs = MethodAttributes.Public | MethodAttributes.HideBySig;
         if (method.IsStatic)
             methodAttrs |= MethodAttributes.Static;
         if (typeDef.Kind == IrTypeKind.Interface)
-            methodAttrs |= MethodAttributes.Abstract | MethodAttributes.Virtual;
+            methodAttrs |= MethodAttributes.Abstract | MethodAttributes.Virtual | MethodAttributes.NewSlot;
+        else if (!method.IsStatic && typeDef.Interfaces.Count > 0)
+            methodAttrs |= MethodAttributes.Virtual; // For interface implementation
 
         var mb = tb.DefineMethod(method.Name, methodAttrs, returnClrType, paramClrTypes);
 
@@ -301,6 +404,10 @@ public sealed class CilEmitter
                 EmitLoadArg(il, idx);
                 break;
 
+            case IrLoadThis:
+                il.Emit(OpCodes.Ldarg_0);
+                break;
+
             case IrBinaryOp { Op: var op, OperandType: var opType }:
                 EmitBinaryOp(il, op, opType);
                 break;
@@ -341,6 +448,10 @@ public sealed class CilEmitter
                 EmitVirtualCall(il, name, argc);
                 break;
 
+            case IrCallMethod { DeclaringType: var dt, MethodName: var mn, ArgCount: var ac }:
+                EmitMethodCall(il, dt, mn, ac);
+                break;
+
             case IrNewObj { TypeName: var typeName, ArgCount: var argc }:
                 EmitNewObj(il, typeName, argc);
                 break;
@@ -376,15 +487,21 @@ public sealed class CilEmitter
                 il.Emit(OpCodes.Nop);
                 break;
 
-            case IrLoadField { FieldName: var name }:
-                if (_fieldBuilders.TryGetValue(name, out var fb))
-                    il.Emit(OpCodes.Ldfld, fb);
+            case IrLoadField { DeclaringType: var dt, FieldName: var fname }:
+            {
+                var key = $"{dt}.{fname}";
+                if (_fieldBuilders.TryGetValue(key, out var loadFb))
+                    il.Emit(OpCodes.Ldfld, loadFb);
                 break;
+            }
 
-            case IrStoreField { FieldName: var name }:
-                if (_fieldBuilders.TryGetValue(name, out var sfb))
-                    il.Emit(OpCodes.Stfld, sfb);
+            case IrStoreField { DeclaringType: var dt, FieldName: var fname }:
+            {
+                var key = $"{dt}.{fname}";
+                if (_fieldBuilders.TryGetValue(key, out var storeFb))
+                    il.Emit(OpCodes.Stfld, storeFb);
                 break;
+            }
 
             case IrCastClass { TypeName: var name }:
                 EmitCast(il, name);
@@ -650,6 +767,20 @@ public sealed class CilEmitter
         }
     }
 
+    private void EmitMethodCall(ILGenerator il, string declaringType, string methodName, int argc)
+    {
+        var key = $"{declaringType}.{methodName}";
+        if (_methodBuilders.TryGetValue(key, out var mb))
+        {
+            il.Emit(OpCodes.Callvirt, mb);
+        }
+        else
+        {
+            // Fallback to generic virtual call
+            EmitVirtualCall(il, methodName, argc);
+        }
+    }
+
     private void EmitNewObj(ILGenerator il, string typeName, int argc)
     {
         if (typeName.StartsWith("System.Collections.Generic.List"))
@@ -659,12 +790,19 @@ public sealed class CilEmitter
             return;
         }
 
+        // Look for a user-defined constructor
+        if (_constructorBuilders.TryGetValue(typeName, out var cb))
+        {
+            il.Emit(OpCodes.Newobj, cb);
+            return;
+        }
+
+        // Fallback for types without explicit constructors
         if (_typeBuilders.TryGetValue(typeName, out var tb))
         {
-            // Find constructor
-            // For now, use default constructor
-            var ctor = tb.DefineDefaultConstructor(MethodAttributes.Public);
-            il.Emit(OpCodes.Newobj, ctor);
+            var defaultCtor = tb.DefineDefaultConstructor(MethodAttributes.Public);
+            _constructorBuilders[typeName] = defaultCtor;
+            il.Emit(OpCodes.Newobj, defaultCtor);
             return;
         }
 
@@ -766,6 +904,14 @@ public sealed class CilEmitter
             IrBinaryOp { Op: IrBinaryOpKind.Div } => typeof(double),
             IrCall { FunctionName: var name } when _methodBuilders.TryGetValue(name, out var mb)
                 => mb.ReturnType,
+            IrCallMethod { DeclaringType: var dt, MethodName: var mn }
+                when _methodBuilders.TryGetValue($"{dt}.{mn}", out var cmb)
+                => cmb.ReturnType,
+            IrNewObj { TypeName: var tn } when _typeBuilders.TryGetValue(tn, out var ntb)
+                => ntb,
+            IrLoadField { DeclaringType: var fdt, FieldName: var fn }
+                when _fieldBuilders.TryGetValue($"{fdt}.{fn}", out var lfb)
+                => lfb.FieldType,
             IrCallBuiltin { Name: "len" or "int" } => typeof(int),
             IrCallBuiltin { Name: "float" } => typeof(double),
             IrCallBuiltin { Name: "str" } => typeof(string),

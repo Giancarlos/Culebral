@@ -1,8 +1,20 @@
 # Skelvon Compiler — Implementation Progress
 
-## Status: Phase 1 Core Complete
+## Status: Phase 2 Complete — Type System + Classes
 
 The compiler implements a full pipeline: Source → Lexer → Parser → Type Checker → IR → CIL Emitter → .NET Assembly.
+
+### Phase 2 Additions
+- **Class instantiation**: `c = Counter(10)` → `newobj .ctor`
+- **Constructors**: `__init__` methods compile to CIL `.ctor` with proper base class chaining
+- **Instance fields**: automatic `this` threading through all instance methods
+- **Field access**: bare names (`count`) resolve to fields in methods; `@field` syntax for disambiguation when parameters shadow fields
+- **Field mutation**: `count += 1`, `@name = value` — augmented and direct assignment to fields
+- **Instance method calls**: `obj.method(args)` → proper `callvirt` with type resolution
+- **Default field values**: `count: int = 0` initialized in constructors
+- **Interface implementation**: `class Dog(Describable):` with proper CLR interface mapping
+- **Interface definitions**: abstract method declarations, null parent type
+- **Multiple instances**: each instance has independent field state
 
 ## What Works (Phase 1 — MVP)
 
@@ -85,6 +97,8 @@ The compiler implements a full pipeline: Source → Lexer → Parser → Type Ch
 - `skelvon ir <file.skv>` — debug IR output
 
 ## Verified Working Programs
+
+### Phase 1 (Functions + Control Flow)
 - Hello World
 - Fibonacci (recursive)
 - Factorial (recursive)
@@ -98,12 +112,25 @@ The compiler implements a full pipeline: Source → Lexer → Parser → Type Ch
 - Multi-parameter functions
 - String return values
 
+### Phase 2 (Classes + Types)
+- Class instantiation with constructor parameters
+- Instance fields with default values
+- Instance method calls
+- Field access (bare names and `@field` disambiguation)
+- Field mutation (direct and augmented assignment)
+- Multiple independent instances
+- F-strings with field interpolation
+- Interface definitions and implementation
+- Classes implementing multiple interfaces
+
 ## Test Suite
-- 74 tests total, all passing
+- 83 tests total, all passing
 - Lexer tests: 14 (tokens, literals, indentation, brackets, edge cases)
 - Parser tests: 30 (all language constructs)
 - Type checker tests: 10 (symbols, types, errors)
-- End-to-end emit tests: 20 (compile → run → verify output)
+- End-to-end emit tests: 29 (compile → run → verify output)
+  - Phase 1: 20 tests (functions, control flow, arithmetic, strings)
+  - Phase 2: 9 tests (classes, constructors, fields, @field, interfaces)
 
 ## Known Limitations / Next Steps
 

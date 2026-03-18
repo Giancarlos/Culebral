@@ -23,6 +23,13 @@ public sealed class IrLowering
     // Loop context for break/continue
     private readonly Stack<(string BreakLabel, string ContinueLabel)> _loopStack = new();
 
+    // Class context — set when lowering methods inside a type
+    private string? _currentDeclaringType;
+    private IrTypeDef? _currentTypeDef;
+
+    // Track known user types for constructor call detection
+    private readonly HashSet<string> _knownTypes = new();
+
     public IrLowering(DiagnosticBag diagnostics, TypeChecker typeChecker)
     {
         _diagnostics = diagnostics;
@@ -32,6 +39,15 @@ public sealed class IrLowering
     public IrModule Lower(CompilationUnit unit, string moduleName, string sourcePath)
     {
         var module = new IrModule { Name = moduleName, SourcePath = sourcePath };
+
+        // Collect known type names first (for constructor call detection)
+        foreach (var node in unit.Statements)
+        {
+            if (node is ClassDef c) _knownTypes.Add(c.Name);
+            else if (node is StructDef s) _knownTypes.Add(s.Name);
+            else if (node is RecordDef r) _knownTypes.Add(r.Name);
+            else if (node is EnumDef e) _knownTypes.Add(e.Name);
+        }
 
         // First pass: lower type definitions
         foreach (var node in unit.Statements)
@@ -91,24 +107,54 @@ public sealed class IrLowering
 
     private IrTypeDef LowerClass(ClassDef cls)
     {
+        // Determine base type vs interfaces
+        // If a base name resolves to an interface type, it's an interface implementation, not inheritance
+        string? baseTypeName = null;
+        var interfaceNames = new List<string>();
+        foreach (var b in cls.Bases)
+        {
+            if (b is SimpleType st)
+            {
+                var sym = _typeChecker.GlobalScope.Lookup(st.Name);
+                if (sym?.Type is InterfaceType)
+                    interfaceNames.Add(st.Name);
+                else if (baseTypeName is null)
+                    baseTypeName = st.Name;
+                else
+                    interfaceNames.Add(st.Name); // Additional bases treated as interfaces
+            }
+        }
+
         var typeDef = new IrTypeDef
         {
             Name = cls.Name,
             Kind = IrTypeKind.Class,
-            BaseType = cls.Bases.Count > 0 && cls.Bases[0] is SimpleType baseType
-                ? baseType.Name : null,
+            BaseType = baseTypeName,
         };
 
+        _currentTypeDef = typeDef;
+
+        // Collect fields first (needed for constructor)
+        foreach (var member in cls.Members)
+        {
+            if (member is FieldDeclaration field)
+            {
+                typeDef.Fields.Add(new IrField
+                {
+                    Name = field.Name,
+                    Type = _typeChecker.ResolveTypeAnnotation(field.Type),
+                    DefaultValue = field.Default is not null ? LowerFieldDefault(field.Default) : null,
+                });
+            }
+        }
+
+        // Lower methods, separating __init__ as constructor
         foreach (var member in cls.Members)
         {
             switch (member)
             {
-                case FieldDeclaration field:
-                    typeDef.Fields.Add(new IrField
-                    {
-                        Name = field.Name,
-                        Type = _typeChecker.ResolveTypeAnnotation(field.Type),
-                    });
+                case FunctionDef { Name: "__init__" } initMethod:
+                    typeDef.Constructor = LowerConstructor(initMethod, cls.Name, typeDef);
                     break;
                 case FunctionDef method:
                     typeDef.Methods.Add(LowerMethod(method, cls.Name));
@@ -120,18 +166,82 @@ public sealed class IrLowering
         }
 
         // Add interfaces
-        foreach (var b in cls.Bases)
+        foreach (var iface in interfaceNames)
+            typeDef.Interfaces.Add(iface);
+
+        _currentTypeDef = null;
+        return typeDef;
+    }
+
+    private IrInstruction? LowerFieldDefault(Expression expr)
+    {
+        // Return a simple constant instruction for the default value
+        return expr switch
         {
-            if (b is SimpleType st)
-                typeDef.Interfaces.Add(st.Name);
+            IntLiteralExpr i => new IrLoadInt(i.Value, expr.Span),
+            FloatLiteralExpr f => new IrLoadFloat(f.Value, expr.Span),
+            StringLiteralExpr s => new IrLoadString(s.Value, expr.Span),
+            BoolLiteralExpr b => new IrLoadBool(b.Value, expr.Span),
+            NoneLiteralExpr => new IrLoadNull(expr.Span),
+            _ => null, // Complex defaults handled in constructor body
+        };
+    }
+
+    private IrFunction LowerConstructor(FunctionDef initMethod, string declaringType, IrTypeDef typeDef)
+    {
+        var parameters = initMethod.Parameters.Select((p, i) => new IrParameter
+        {
+            Name = p.Name,
+            Type = _typeChecker.ResolveTypeAnnotation(p.Type),
+            Index = i + 1, // +1 because arg 0 is 'this'
+        }).ToList();
+
+        var entryBlock = new IrBasicBlock { Label = NewBlockLabel("ctor_entry") };
+        var body = new List<IrBasicBlock> { entryBlock };
+
+        var irFunc = new IrFunction
+        {
+            Name = ".ctor",
+            ReturnType = PrimitiveType.Void,
+            Parameters = parameters,
+            Body = body,
+            IsStatic = false,
+            DeclaringType = declaringType,
+        };
+
+        _currentFunction = irFunc;
+        _currentBlock = entryBlock;
+        _currentDeclaringType = declaringType;
+        _localCounter = 0;
+
+        // Initialize fields with default values
+        foreach (var field in typeDef.Fields)
+        {
+            if (field.DefaultValue is not null)
+            {
+                _currentBlock.Emit(new IrLoadThis(initMethod.Span));
+                _currentBlock.Emit(field.DefaultValue);
+                _currentBlock.Emit(new IrStoreField(declaringType, field.Name, initMethod.Span));
+            }
         }
 
-        return typeDef;
+        // Lower the __init__ body
+        LowerBlock(initMethod.Body);
+
+        if (_currentBlock is not null && !EndsWithReturn(_currentBlock))
+            _currentBlock.Emit(new IrReturn(false, initMethod.Span));
+
+        _currentFunction = null;
+        _currentBlock = null;
+        _currentDeclaringType = null;
+
+        return irFunc;
     }
 
     private IrTypeDef LowerStruct(StructDef strct)
     {
         var typeDef = new IrTypeDef { Name = strct.Name, Kind = IrTypeKind.Struct };
+        _currentTypeDef = typeDef;
 
         foreach (var member in strct.Members)
         {
@@ -150,12 +260,14 @@ public sealed class IrLowering
             }
         }
 
+        _currentTypeDef = null;
         return typeDef;
     }
 
     private IrTypeDef LowerRecord(RecordDef rec)
     {
         var typeDef = new IrTypeDef { Name = rec.Name, Kind = IrTypeKind.Record };
+        _currentTypeDef = typeDef;
 
         foreach (var member in rec.Members)
         {
@@ -168,12 +280,16 @@ public sealed class IrLowering
                         Type = _typeChecker.ResolveTypeAnnotation(field.Type),
                     });
                     break;
+                case FunctionDef { Name: "__init__" } initMethod:
+                    typeDef.Constructor = LowerConstructor(initMethod, rec.Name, typeDef);
+                    break;
                 case FunctionDef method:
                     typeDef.Methods.Add(LowerMethod(method, rec.Name));
                     break;
             }
         }
 
+        _currentTypeDef = null;
         return typeDef;
     }
 
@@ -285,11 +401,12 @@ public sealed class IrLowering
             ? _typeChecker.ResolveTypeAnnotation(method.ReturnType)
             : PrimitiveType.Void;
 
+        // Instance methods: params start at index 1 (arg 0 = this)
         var parameters = method.Parameters.Select((p, i) => new IrParameter
         {
             Name = p.Name,
             Type = _typeChecker.ResolveTypeAnnotation(p.Type),
-            Index = i,
+            Index = i + 1, // +1 for implicit 'this'
         }).ToList();
 
         var entryBlock = new IrBasicBlock { Label = NewBlockLabel("entry") };
@@ -301,13 +418,19 @@ public sealed class IrLowering
             ReturnType = returnType,
             Parameters = parameters,
             Body = body,
-            IsStatic = false, // Instance methods
+            IsStatic = false,
             IsAsync = method.IsAsync,
             DeclaringType = declaringType,
         };
 
+        var prevFunction = _currentFunction;
+        var prevBlock = _currentBlock;
+        var prevDeclaringType = _currentDeclaringType;
+        var prevLocalCounter = _localCounter;
+
         _currentFunction = irFunc;
         _currentBlock = entryBlock;
+        _currentDeclaringType = declaringType;
         _localCounter = 0;
 
         LowerBlock(method.Body);
@@ -315,8 +438,10 @@ public sealed class IrLowering
         if (_currentBlock is not null && !EndsWithReturn(_currentBlock))
             _currentBlock.Emit(new IrReturn(false, method.Span));
 
-        _currentFunction = null;
-        _currentBlock = null;
+        _currentFunction = prevFunction;
+        _currentBlock = prevBlock;
+        _currentDeclaringType = prevDeclaringType;
+        _localCounter = prevLocalCounter;
 
         return irFunc;
     }
@@ -476,22 +601,63 @@ public sealed class IrLowering
 
         if (assign.Target is IdentifierExpr ident)
         {
-            // Infer the type from the resolved type of the value expression
-            var valueType = _typeChecker.ResolvedTypes.TryGetValue(assign.Value, out var resolved)
-                ? resolved
-                : PrimitiveType.Object;
-            var local = GetOrCreateLocal(ident.Name, assign.Span, valueType);
-            _currentBlock.Emit(new IrStoreLocal(local.Index, assign.Span));
+            // Check if it's an existing local or parameter first
+            var existingLocal = _currentFunction.Locals.FirstOrDefault(l => l.Name == ident.Name);
+            var existingParam = _currentFunction.Parameters.FirstOrDefault(p => p.Name == ident.Name);
+
+            if (existingLocal is not null)
+            {
+                _currentBlock.Emit(new IrStoreLocal(existingLocal.Index, assign.Span));
+            }
+            else if (existingParam is not null)
+            {
+                // Can't store to params directly in CIL easily; use a local
+                var local = GetOrCreateLocal(ident.Name, assign.Span, existingParam.Type);
+                _currentBlock.Emit(new IrStoreLocal(local.Index, assign.Span));
+            }
+            else if (_currentDeclaringType is not null && _currentTypeDef is not null &&
+                     _currentTypeDef.Fields.Any(f => f.Name == ident.Name))
+            {
+                // Bare name assignment to a field: count = value → this.count = value
+                var tempLocal = CreateLocal("<field_tmp>", PrimitiveType.Object);
+                _currentBlock.Emit(new IrStoreLocal(tempLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrLoadThis(assign.Span));
+                _currentBlock.Emit(new IrLoadLocal(tempLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrStoreField(_currentDeclaringType, ident.Name, assign.Span));
+            }
+            else
+            {
+                // New local variable
+                var valueType = _typeChecker.ResolvedTypes.TryGetValue(assign.Value, out var resolved)
+                    ? resolved
+                    : PrimitiveType.Object;
+                var local = GetOrCreateLocal(ident.Name, assign.Span, valueType);
+                _currentBlock.Emit(new IrStoreLocal(local.Index, assign.Span));
+            }
         }
         else if (assign.Target is FieldAccessExpr field)
         {
-            _currentBlock.Emit(new IrStoreField(field.FieldName, assign.Span));
+            // @field = value → this.field = value
+            // Value is on stack, but stfld needs: this, value
+            // So we need to reorder: store value in temp, load this, load temp, stfld
+            if (_currentDeclaringType is not null)
+            {
+                var tempLocal = CreateLocal("<field_tmp>", PrimitiveType.Object);
+                _currentBlock.Emit(new IrStoreLocal(tempLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrLoadThis(assign.Span));
+                _currentBlock.Emit(new IrLoadLocal(tempLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrStoreField(_currentDeclaringType, field.FieldName, assign.Span));
+            }
         }
         else if (assign.Target is MemberAccessExpr member)
         {
-            // obj.field = value → need to load obj first, then store field
-            // For now, simplified
-            _currentBlock.Emit(new IrStoreField(member.Member, assign.Span));
+            // obj.field = value → value already on stack, need: obj, value, stfld
+            var tempLocal = CreateLocal("<member_tmp>", PrimitiveType.Object);
+            _currentBlock.Emit(new IrStoreLocal(tempLocal.Index, assign.Span));
+            LowerExpression(member.Object);
+            _currentBlock.Emit(new IrLoadLocal(tempLocal.Index, assign.Span));
+            var objType = _typeChecker.ResolvedTypes.TryGetValue(member.Object, out var ot) ? ot : null;
+            _currentBlock.Emit(new IrStoreField(objType?.DisplayName ?? "object", member.Member, assign.Span));
         }
     }
 
@@ -511,15 +677,47 @@ public sealed class IrLowering
 
     private void LowerAugmentedAssignment(AugmentedAssignmentStatement augAssign)
     {
-        if (_currentBlock is null) return;
+        if (_currentBlock is null || _currentFunction is null) return;
 
         if (augAssign.Target is IdentifierExpr ident)
         {
-            var local = GetOrCreateLocal(ident.Name, augAssign.Span);
-            _currentBlock.Emit(new IrLoadLocal(local.Index, augAssign.Span));
+            // Check if it's a local
+            var local = _currentFunction.Locals.FirstOrDefault(l => l.Name == ident.Name);
+            if (local is not null)
+            {
+                _currentBlock.Emit(new IrLoadLocal(local.Index, augAssign.Span));
+                LowerExpression(augAssign.Value);
+                _currentBlock.Emit(new IrBinaryOp(MapAugmentedOp(augAssign.Op), local.Type, augAssign.Span));
+                _currentBlock.Emit(new IrStoreLocal(local.Index, augAssign.Span));
+                return;
+            }
+
+            // Check if it's a field (in instance method)
+            if (_currentDeclaringType is not null && _currentTypeDef is not null &&
+                _currentTypeDef.Fields.Any(f => f.Name == ident.Name))
+            {
+                var field = _currentTypeDef.Fields.First(f => f.Name == ident.Name);
+                // Load current value: this.field
+                _currentBlock.Emit(new IrLoadThis(augAssign.Span));
+                _currentBlock.Emit(new IrLoadField(_currentDeclaringType, ident.Name, augAssign.Span));
+                // Compute new value
+                LowerExpression(augAssign.Value);
+                _currentBlock.Emit(new IrBinaryOp(MapAugmentedOp(augAssign.Op), field.Type, augAssign.Span));
+                // Store: this.field = result
+                var tempLocal = CreateLocal("<aug_tmp>", field.Type);
+                _currentBlock.Emit(new IrStoreLocal(tempLocal.Index, augAssign.Span));
+                _currentBlock.Emit(new IrLoadThis(augAssign.Span));
+                _currentBlock.Emit(new IrLoadLocal(tempLocal.Index, augAssign.Span));
+                _currentBlock.Emit(new IrStoreField(_currentDeclaringType, ident.Name, augAssign.Span));
+                return;
+            }
+
+            // Fallback: create a new local
+            var newLocal = GetOrCreateLocal(ident.Name, augAssign.Span);
+            _currentBlock.Emit(new IrLoadLocal(newLocal.Index, augAssign.Span));
             LowerExpression(augAssign.Value);
-            _currentBlock.Emit(new IrBinaryOp(MapAugmentedOp(augAssign.Op), local.Type, augAssign.Span));
-            _currentBlock.Emit(new IrStoreLocal(local.Index, augAssign.Span));
+            _currentBlock.Emit(new IrBinaryOp(MapAugmentedOp(augAssign.Op), newLocal.Type, augAssign.Span));
+            _currentBlock.Emit(new IrStoreLocal(newLocal.Index, augAssign.Span));
         }
     }
 
@@ -694,7 +892,12 @@ public sealed class IrLowering
                 break;
 
             case FieldAccessExpr field:
-                _currentBlock.Emit(new IrLoadField(field.FieldName, expr.Span));
+                // @field_name → this.field_name
+                if (_currentDeclaringType is not null)
+                {
+                    _currentBlock.Emit(new IrLoadThis(expr.Span));
+                    _currentBlock.Emit(new IrLoadField(_currentDeclaringType, field.FieldName, expr.Span));
+                }
                 break;
 
             case BinaryExpr bin:
@@ -717,9 +920,14 @@ public sealed class IrLowering
                 break;
 
             case MemberAccessExpr member:
+            {
                 LowerExpression(member.Object);
-                _currentBlock.Emit(new IrLoadField(member.Member, expr.Span));
+                // Determine the type of the object to resolve the field
+                var objType = _typeChecker.ResolvedTypes.TryGetValue(member.Object, out var ot) ? ot : null;
+                var typeName = objType?.DisplayName ?? "object";
+                _currentBlock.Emit(new IrLoadField(typeName, member.Member, expr.Span));
                 break;
+            }
 
             case IndexExpr index:
                 LowerExpression(index.Object);
@@ -784,6 +992,18 @@ public sealed class IrLowering
             return;
         }
 
+        // In an instance method, bare names can refer to fields
+        if (_currentDeclaringType is not null && _currentTypeDef is not null)
+        {
+            var field = _currentTypeDef.Fields.FirstOrDefault(f => f.Name == ident.Name);
+            if (field is not null)
+            {
+                _currentBlock.Emit(new IrLoadThis(ident.Span));
+                _currentBlock.Emit(new IrLoadField(_currentDeclaringType, ident.Name, ident.Span));
+                return;
+            }
+        }
+
         // Could be a function name or type — emit as a reference
         _currentBlock.Emit(new IrLoadNull(ident.Span)); // Placeholder
     }
@@ -792,7 +1012,7 @@ public sealed class IrLowering
     {
         if (_currentBlock is null) return;
 
-        // Handle built-in functions
+        // Handle built-in functions and constructor calls
         if (call.Callee is IdentifierExpr ident)
         {
             var builtins = new HashSet<string>
@@ -810,6 +1030,15 @@ public sealed class IrLowering
                 return;
             }
 
+            // Constructor call: TypeName(args) → newobj .ctor
+            if (_knownTypes.Contains(ident.Name))
+            {
+                foreach (var arg in call.Arguments)
+                    LowerExpression(arg.Value);
+                _currentBlock.Emit(new IrNewObj(ident.Name, call.Arguments.Count, call.Span));
+                return;
+            }
+
             // Regular function call
             foreach (var arg in call.Arguments)
                 LowerExpression(arg.Value);
@@ -823,7 +1052,18 @@ public sealed class IrLowering
             LowerExpression(member.Object);
             foreach (var arg in call.Arguments)
                 LowerExpression(arg.Value);
-            _currentBlock.Emit(new IrCallVirtual(member.Member, call.Arguments.Count, call.Span));
+
+            // Determine if this is a call on a known user type
+            var objType = _typeChecker.ResolvedTypes.TryGetValue(member.Object, out var ot) ? ot : null;
+            var typeName = objType?.DisplayName;
+            if (typeName is not null && _knownTypes.Contains(typeName))
+            {
+                _currentBlock.Emit(new IrCallMethod(typeName, member.Member, call.Arguments.Count, call.Span));
+            }
+            else
+            {
+                _currentBlock.Emit(new IrCallVirtual(member.Member, call.Arguments.Count, call.Span));
+            }
             return;
         }
 

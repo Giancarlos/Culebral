@@ -282,6 +282,203 @@ public class EmitTests : IDisposable
         Assert.Equal("36", output);
     }
 
+    // ─── Phase 2: Class Tests ───
+
+    [Fact]
+    public void ClassWithConstructor_Works()
+    {
+        var output = CompileAndRun("""
+            class Counter:
+                count: int = 0
+
+                def __init__(start: int):
+                    count = start
+
+                def get_count() -> int:
+                    return count
+
+            def main():
+                c = Counter(42)
+                print(c.get_count())
+            """);
+        Assert.Equal("42", output);
+    }
+
+    [Fact]
+    public void ClassFieldMutation_Works()
+    {
+        var output = CompileAndRun("""
+            class Counter:
+                count: int = 0
+
+                def __init__(start: int):
+                    count = start
+
+                def increment() -> int:
+                    count += 1
+                    return count
+
+            def main():
+                c = Counter(0)
+                print(c.increment())
+                print(c.increment())
+                print(c.increment())
+            """);
+        Assert.Equal("1\n2\n3", output);
+    }
+
+    [Fact]
+    public void ClassAtFieldSyntax_Works()
+    {
+        var output = CompileAndRun("""
+            class Box:
+                value: int = 0
+
+                def __init__(value: int):
+                    @value = value
+
+                def get_value() -> int:
+                    return @value
+
+            def main():
+                b = Box(99)
+                print(b.get_value())
+            """);
+        Assert.Equal("99", output);
+    }
+
+    [Fact]
+    public void MultipleInstances_Independent()
+    {
+        var output = CompileAndRun("""
+            class Counter:
+                count: int = 0
+
+                def __init__(start: int):
+                    count = start
+
+                def increment() -> int:
+                    count += 1
+                    return count
+
+            def main():
+                a = Counter(0)
+                b = Counter(100)
+                print(a.increment())
+                print(b.increment())
+                print(a.increment())
+            """);
+        Assert.Equal("1\n101\n2", output);
+    }
+
+    [Fact]
+    public void ClassWithStringField_Works()
+    {
+        var output = CompileAndRun("""
+            class Greeter:
+                name: str = ""
+
+                def __init__(name: str):
+                    @name = name
+
+                def greet() -> str:
+                    return f"Hello, {@name}!"
+
+            def main():
+                g = Greeter("World")
+                print(g.greet())
+            """);
+        Assert.Equal("Hello, World!", output);
+    }
+
+    [Fact]
+    public void ClassMethodWithParams_Works()
+    {
+        var output = CompileAndRun("""
+            class Adder:
+                base_val: int = 0
+
+                def __init__(base_val: int):
+                    @base_val = base_val
+
+                def add(x: int) -> int:
+                    return @base_val + x
+
+            def main():
+                a = Adder(10)
+                print(a.add(5))
+                print(a.add(20))
+            """);
+        Assert.Equal("15\n30", output);
+    }
+
+    [Fact]
+    public void ClassDefaultFieldValues_Work()
+    {
+        var output = CompileAndRun("""
+            class Config:
+                retries: int = 3
+                timeout: int = 30
+
+                def get_retries() -> int:
+                    return retries
+
+                def get_timeout() -> int:
+                    return timeout
+
+            def main():
+                c = Config()
+                print(c.get_retries())
+                print(c.get_timeout())
+            """);
+        Assert.Equal("3\n30", output);
+    }
+
+    [Fact]
+    public void InterfaceImplementation_Works()
+    {
+        var output = CompileAndRun("""
+            interface Describable:
+                def describe() -> str
+
+            class Dog(Describable):
+                name: str = ""
+
+                def __init__(name: str):
+                    @name = name
+
+                def describe() -> str:
+                    return f"Dog: {@name}"
+
+            def main():
+                d = Dog("Rex")
+                print(d.describe())
+            """);
+        Assert.Equal("Dog: Rex", output);
+    }
+
+    [Fact]
+    public void ClassWithMultipleFields_Works()
+    {
+        var output = CompileAndRun("""
+            class Point:
+                x: int = 0
+                y: int = 0
+
+                def __init__(x: int, y: int):
+                    @x = x
+                    @y = y
+
+                def sum() -> int:
+                    return @x + @y
+
+            def main():
+                p = Point(3, 7)
+                print(p.sum())
+            """);
+        Assert.Equal("10", output);
+    }
+
     [Fact]
     public void CompilationDiagnostics_ReportErrors()
     {

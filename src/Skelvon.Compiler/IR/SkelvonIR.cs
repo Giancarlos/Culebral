@@ -29,6 +29,7 @@ public sealed class IrTypeDef
     public List<IrProperty> Properties { get; } = [];
     public List<string> Interfaces { get; } = [];
     public string? BaseType { get; init; }
+    public IrFunction? Constructor { get; set; }
 }
 
 public enum IrTypeKind
@@ -113,8 +114,11 @@ public sealed record IrLoadNull(SourceSpan Span) : IrInstruction(Span);
 public sealed record IrLoadLocal(int Index, SourceSpan Span) : IrInstruction(Span);
 public sealed record IrStoreLocal(int Index, SourceSpan Span) : IrInstruction(Span);
 public sealed record IrLoadArg(int Index, SourceSpan Span) : IrInstruction(Span);
-public sealed record IrLoadField(string FieldName, SourceSpan Span) : IrInstruction(Span);
-public sealed record IrStoreField(string FieldName, SourceSpan Span) : IrInstruction(Span);
+public sealed record IrLoadThis(SourceSpan Span) : IrInstruction(Span);
+
+// Field access — DeclaringType is the fully-qualified type name for resolution
+public sealed record IrLoadField(string DeclaringType, string FieldName, SourceSpan Span) : IrInstruction(Span);
+public sealed record IrStoreField(string DeclaringType, string FieldName, SourceSpan Span) : IrInstruction(Span);
 
 // Arithmetic
 public sealed record IrBinaryOp(IrBinaryOpKind Op, SkelvonType? OperandType, SourceSpan Span) : IrInstruction(Span);
@@ -142,6 +146,8 @@ public sealed record IrReturn(bool HasValue, SourceSpan Span) : IrInstruction(Sp
 public sealed record IrCall(string FunctionName, int ArgCount, bool IsStatic, SourceSpan Span) : IrInstruction(Span);
 public sealed record IrCallVirtual(string MethodName, int ArgCount, SourceSpan Span) : IrInstruction(Span);
 public sealed record IrCallBuiltin(string Name, int ArgCount, SourceSpan Span) : IrInstruction(Span);
+/// <summary>Call an instance method on a user-defined type. Receiver is already on the stack.</summary>
+public sealed record IrCallMethod(string DeclaringType, string MethodName, int ArgCount, SourceSpan Span) : IrInstruction(Span);
 
 // Object operations
 public sealed record IrNewObj(string TypeName, int ArgCount, SourceSpan Span) : IrInstruction(Span);
