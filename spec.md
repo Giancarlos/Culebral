@@ -2302,49 +2302,160 @@ name.starts_with("  H") # Same (snake_case .NET bridge)
 
 ---
 
-### 4.29 Built-in Functions (Extended Set)
+### 4.29 Built-in Functions — Complete Audit
 
-**Status:** `print`, `len`, `range`, `int`, `float`, `str` are implemented. Many Python built-ins are missing.
+Python has 71 built-in functions. Culebral implements a subset. This section is the authoritative reference for what exists, what's broken, what's missing, and what's deliberately excluded.
 
-**Built-in functions to add:**
+#### Currently implemented and working (14 functions)
 
-| Function | .NET mapping | Priority |
+| Function | .NET mapping | Overloads | Python parity | Notes |
+|---|---|---|---|---|
+| `print(...)` | `Console.WriteLine` / `IrPrint` | Multi-arg, sep, end, flush, file | **100%** | Full Python compat via IrPrint instruction |
+| `len(x)` | `.Length` / `.Count` / `__len__` | 1 (polymorphic) | **95%** | Works on string, list, dict, set, arrays, user types with `__len__` |
+| `str(x)` | `object.ToString()` | 1 | **100%** | |
+| `int(x)` | `Convert.ToInt32(object)` | 1 | **70%** | Missing `base` param — `int("ff", 16)` fails |
+| `float(x)` | `Convert.ToDouble(object)` | 1 | **100%** | |
+| `abs(x)` | `Math.Abs(int/double)` | 1 (type-aware) | **95%** | No complex number support (excluded by design) |
+| `min(a, b)` | `Math.Min(int/double)` | 1 (binary only) | **30%** | Missing: iterable form, variadic, `key=`, `default=` |
+| `max(a, b)` | `Math.Max(int/double)` | 1 (binary only) | **30%** | Missing: iterable form, variadic, `key=`, `default=` |
+| `range(...)` | `Enumerable.Range` | 3 (1/2/3 arg) | **70%** | Missing: negative step, step=0 validation |
+| `round(x)` | `(int)Math.Round(double)` | 1 | **50%** | Missing `ndigits` param — `round(3.14, 2)` fails |
+| `input(prompt)` | `Console.Write` + `Console.ReadLine` | 1 | **100%** | |
+| `chr(n)` | `((char)n).ToString()` | 1 | **100%** | |
+| `ord(c)` | `string[0]` cast to int | 1 | **100%** | |
+| `type(x)` | `x.GetType().Name` | 1 | **70%** | Returns string, not type object |
+
+#### Broken stubs — declared but crash at runtime (7 functions)
+
+These are registered in the symbol table and pass type checking, but the emitter has no implementation. They silently emit a warning and push nothing useful onto the stack. **This is the worst kind of bug — code compiles but crashes.**
+
+| Function | .NET mapping | Args | What it should do |
+|---|---|---|---|
+| `bool(x)` | Truthiness test | 1 | `x != 0`, `x != ""`, `x != None`, `len(x) != 0` — emit as conditional. For objects, check `__bool__` dunder, then `__len__` dunder, then default `true`. |
+| `sorted(iterable)` | LINQ `.OrderBy(x => x).ToList()` | 1-3 | Sort iterable, return new list. Support `key=` function and `reverse=` bool. |
+| `enumerate(iterable)` | LINQ `.Select((x, i) => (i, x))` | 1-2 | Yield `(index, value)` tuples. Support `start=` offset. |
+| `zip(a, b)` | LINQ `.Zip(a, b)` | 2+ | Yield tuples from parallel iterables. Stop at shortest. |
+| `map(fn, iterable)` | LINQ `.Select(fn)` | 2+ | Apply function to each element, yield results. |
+| `filter(fn, iterable)` | LINQ `.Where(fn)` | 2 | Yield elements where `fn(element)` is truthy. `filter(None, iterable)` filters falsy values. |
+| `isinstance(x, T)` | `x is T` | 2 | Runtime type check. Should support single type or tuple of types. |
+
+**Fix priority: CRITICAL.** These must either be implemented or removed from the symbol table. Silently broken stubs are unacceptable.
+
+#### Missing — should implement (16 functions)
+
+These are common Python built-ins that don't exist in Culebral at all. Ordered by priority.
+
+| Function | .NET mapping | Python signature | Priority | Notes |
+|---|---|---|---|---|
+| `all(iterable)` | `Enumerable.All(x => truthy(x))` | `all(iterable) → bool` | **Critical** | Returns True if all elements are truthy |
+| `any(iterable)` | `Enumerable.Any(x => truthy(x))` | `any(iterable) → bool` | **Critical** | Returns True if any element is truthy |
+| `sum(iterable)` | `Enumerable.Sum()` or loop | `sum(iterable, start=0) → number` | **Critical** | Sum with optional start value |
+| `list(iterable)` | `new List<object>(iterable)` | `list(iterable?) → list` | **High** | Convert iterable to list. `list()` = empty list |
+| `dict(...)` | `new Dictionary<object,object>()` | `dict(**kwargs)` / `dict(iterable)` | **High** | Convert to dict. `dict()` = empty dict |
+| `set(iterable)` | `new HashSet<object>(iterable)` | `set(iterable?) → set` | **High** | Convert iterable to set. `set()` = empty set |
+| `tuple(iterable)` | ValueTuple construction | `tuple(iterable?) → tuple` | **High** | Convert iterable to tuple |
+| `reversed(seq)` | `Enumerable.Reverse()` | `reversed(sequence) → iterator` | **Medium** | Reverse iteration. Works on lists, strings, ranges |
+| `hash(x)` | `x.GetHashCode()` | `hash(object) → int` | **Medium** | Returns hash value. Must be consistent with `__hash__` dunder |
+| `repr(x)` | `x.ToString()` (with repr semantics) | `repr(object) → str` | **Medium** | Unambiguous string representation. Strings get quotes: `repr("hi")` → `"'hi'"` |
+| `divmod(a, b)` | `(a / b, a % b)` as tuple | `divmod(a, b) → (quotient, remainder)` | **Medium** | Returns tuple of (quotient, remainder) |
+| `pow(x, y, z)` | `Math.Pow` + modular | `pow(base, exp, mod=None) → number` | **Medium** | `**` operator exists, but 3-arg modular form `pow(base, exp, mod)` doesn't |
+| `hex(n)` | `n.ToString("x")` | `hex(int) → str` | **Low** | Returns `"0xff"` format string |
+| `bin(n)` | `Convert.ToString(n, 2)` | `bin(int) → str` | **Low** | Returns `"0b1010"` format string |
+| `oct(n)` | `Convert.ToString(n, 8)` | `oct(int) → str` | **Low** | Returns `"0o17"` format string |
+| `format(value, spec)` | `String.Format` / `IFormattable` | `format(value, format_spec='') → str` | **Low** | Custom string formatting |
+
+#### Overload gaps on existing builtins
+
+These builtins work but are missing Python-compatible overloads or parameters.
+
+**`min` / `max` — currently binary only, Python supports 4 forms:**
+```python
+min(a, b)                    # ✅ Works
+min(a, b, c, d)              # ❌ Variadic — not supported
+min([1, 2, 3])               # ❌ Iterable — not supported
+min([1, 2, 3], key=abs)      # ❌ Key function — not supported
+min([], default=0)           # ❌ Default for empty — not supported
+```
+**Fix:** Detect arg count. 1 arg → iterable form (loop to find min). 2+ args → variadic (compare pairwise). Named `key=` and `default=` are lower priority.
+
+**`range` — negative step broken:**
+```python
+range(5)                     # ✅ [0, 1, 2, 3, 4]
+range(2, 8)                  # ✅ [2, 3, 4, 5, 6, 7]
+range(0, 10, 2)              # ✅ [0, 2, 4, 6, 8]
+range(5, 0, -1)              # ❌ Should be [5, 4, 3, 2, 1] — broken
+range(10, 0, -2)             # ❌ Should be [10, 8, 6, 4, 2] — broken
+range(0, 10, 0)              # ❌ Should raise ValueError — not validated
+```
+**Fix:** Replace `Enumerable.Range` with a custom range implementation that handles negative step via a descending loop. Validate step != 0 at compile time or runtime.
+
+**`round` — missing ndigits:**
+```python
+round(3.14159)               # ✅ Returns 3
+round(3.14159, 2)            # ❌ Should return 3.14 — not supported
+round(3.14159, 0)            # ❌ Should return 3.0 (float!) — not supported
+round(1234, -2)              # ❌ Should return 1200 — not supported
+```
+**Fix:** Check arg count. 1 arg → current behavior. 2 args → `Math.Round(x, ndigits)` and return float (not int) when ndigits is specified.
+
+**`int` — missing base parameter:**
+```python
+int("42")                    # ✅ Returns 42
+int("ff", 16)                # ❌ Should return 255 — not supported
+int("0b1010", 2)             # ❌ Should return 10 — not supported
+int("0o17", 8)               # ❌ Should return 15 — not supported
+int("0xff", 16)              # ❌ Should return 255 — not supported
+```
+**Fix:** Check arg count. 1 arg → `Convert.ToInt32(x)`. 2 args → `Convert.ToInt32(string, base)`. Strip `0x`/`0b`/`0o` prefixes before conversion.
+
+#### Not needed — use .NET interop directly (18 functions)
+
+These Python built-ins have direct .NET equivalents accessible via `from System.X import Y`. Adding Culebral wrappers would be indirection for no benefit.
+
+| Python | .NET equivalent | How to use in Culebral |
 |---|---|---|
-| `type(x)` | `x.GetType()` | High |
-| `isinstance(x, T)` | `x is T` | High |
-| `abs(x)` | `Math.Abs(x)` | High |
-| `min(a, b)` / `min(iterable)` | `Math.Min` / LINQ `.Min()` | High |
-| `max(a, b)` / `max(iterable)` | `Math.Max` / LINQ `.Max()` | High |
-| `sum(iterable)` | LINQ `.Sum()` | High |
-| `sorted(iterable)` | LINQ `.OrderBy(x => x).ToList()` | High |
-| `reversed(iterable)` | LINQ `.Reverse()` | Medium |
-| `enumerate(iterable)` | LINQ `.Select((x, i) => (i, x))` | High |
-| `zip(a, b)` | LINQ `.Zip(a, b)` | High |
-| `map(fn, iterable)` | LINQ `.Select(fn)` | Medium |
-| `filter(fn, iterable)` | LINQ `.Where(fn)` | Medium |
-| `any(iterable)` | LINQ `.Any()` | Medium |
-| `all(iterable)` | LINQ `.All()` | Medium |
-| `input(prompt)` | `Console.ReadLine()` | Medium |
-| `hash(x)` | `x.GetHashCode()` | Medium |
-| `id(x)` | `RuntimeHelpers.GetHashCode(x)` | Low |
-| `round(x, n)` | `Math.Round(x, n)` | Medium |
-| `pow(base, exp)` | `Math.Pow(base, exp)` | Medium |
-| `chr(n)` | `(char)n` | Low |
-| `ord(c)` | `(int)c` | Low |
-| `hex(n)` | `n.ToString("X")` | Low |
-| `bin(n)` | `Convert.ToString(n, 2)` | Low |
-| `oct(n)` | `Convert.ToString(n, 8)` | Low |
-| `open(path)` | `File.OpenText(path)` | High |
-| `set()` | `new HashSet<object>()` | Medium |
-| `dict()` | `new Dictionary<object,object>()` | Medium |
-| `list()` | `new List<object>()` | Medium |
-| `tuple()` | Tuple constructor | Low |
-| `repr(x)` | `x.ToString()` (with repr flag) | Low |
+| `open(path)` | `System.IO.File` | `from System.IO import File; f = File.open_text(path)` |
+| `bytes(...)` | `System.Text.Encoding` | `from System.Text import Encoding` |
+| `bytearray(...)` | `byte[]` | Direct array type |
+| `complex(r, i)` | `System.Numerics.Complex` | `from System.Numerics import Complex` |
+| `frozenset(...)` | `ImmutableHashSet<T>` | `from System.Collections.Immutable import ImmutableHashSet` |
+| `iter(x)` | `.GetEnumerator()` | Method call on any iterable |
+| `next(it)` | `.MoveNext()` + `.Current` | Method calls on enumerator |
+| `object()` | `object()` | Direct constructor |
+| `super()` | Base class access | Handled by compiler |
+| `classmethod` | Static methods | `def` in class body |
+| `staticmethod` | Static methods | `def` in class body |
+| `property(...)` | `prop` keyword | First-class in Culebral |
+| `slice(...)` | Slice syntax | `items[1:3]` works directly |
+| `ascii(x)` | `Encoding.ASCII` | .NET encoding |
+| `memoryview(...)` | `Span<T>` / `Memory<T>` | .NET memory types |
+| `callable(x)` | Type checking | Culebral is statically typed — callability is known at compile time |
+| `vars(x)` / `dir(x)` | Reflection | `from System.Reflection import ...` |
+| `getattr/setattr/delattr/hasattr` | Reflection | Dynamic attribute access not supported by design |
 
-**Implementation notes:**
-- Each built-in maps to a static .NET method or constructor. The type checker recognizes the name and infers the return type. The emitter produces the corresponding CIL.
-- `min`/`max`/`sum` have both two-argument and iterable overloads. The type checker must disambiguate based on argument count and types.
-- `open()` should return a type compatible with the `with` statement (implements `IDisposable`).
+#### Deliberately excluded (20+ functions)
+
+These Python built-ins conflict with Culebral's design principles or have no meaningful equivalent in a statically-typed compiled language.
+
+| Function | Reason for exclusion |
+|---|---|
+| `eval(expr)` / `exec(code)` | Security hole. No runtime code evaluation. Design principle #5. |
+| `compile(source)` | No runtime compilation. |
+| `globals()` / `locals()` | No runtime namespace introspection. Variables are compiled away. |
+| `breakpoint()` | Use IDE debugger + PDB files instead. |
+| `__import__(name)` | Imports are resolved at compile time. |
+| `id(x)` | Object identity is a CPython implementation detail. Use `is` for identity checks. |
+| `issubclass(A, B)` | Use `is` operator or interfaces. Runtime type hierarchy checks encourage fragile code. |
+| `help(x)` | Interactive REPL feature, not a language built-in. |
+| `aiter(x)` / `anext(x)` | Async iteration handled by `async for` syntax. |
+| All 30+ exception types | Exceptions come from .NET (`System.Exception`, `System.ArgumentException`, etc.). No need to re-declare them. |
+
+#### Implementation notes
+
+- Each built-in maps to a static .NET method, a LINQ extension, or inline CIL. The type checker recognizes the name and infers the return type. The emitter produces the corresponding CIL.
+- Builtins with multiple overloads (min, max, range, round, int) must check arg count in the emitter and dispatch to the correct .NET method.
+- Iterable builtins (sorted, reversed, enumerate, zip, map, filter, all, any, sum) should emit LINQ calls when possible for zero-allocation lazy evaluation. Fall back to list materialization when the result must be a concrete collection.
+- `bool(x)` truthiness rules: `False`, `0`, `0.0`, `""`, `None`, empty collections → `False`. Everything else → `True`. Check `__bool__` dunder first, then `__len__`, then default `True`.
 
 ---
 
