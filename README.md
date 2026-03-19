@@ -312,7 +312,7 @@ dotnet run --project src/Culebral.Compiler -- ir samples/fibonacci.cbl
 
 ## License
 
-TBD
+[MIT](LICENSE)
 
 ---
 
