@@ -1,15 +1,15 @@
 <p align="center">
   <br>
-  <code>S K E L V O N</code>
+  <code>C U L E B R A L</code>
   <br><br>
-  <em>The skeleton of Python, forged for .NET.</em>
+  <em>The skeleton of Python, reforged for .NET.</em>
   <br><br>
   <a href="#quickstart">Quickstart</a> · <a href="#the-language">Language</a> · <a href="#architecture">Architecture</a> · <a href="#building">Building</a>
   <br><br>
   <img src="https://img.shields.io/badge/.NET-10.0-512BD4?style=flat" alt=".NET 10">
   <img src="https://img.shields.io/badge/C%23-14-239120?style=flat" alt="C# 14">
-  <img src="https://img.shields.io/badge/tests-74%20passing-22863a?style=flat" alt="Tests">
-  <img src="https://img.shields.io/badge/phase-1%20MVP-e6a817?style=flat" alt="Phase 1">
+  <img src="https://img.shields.io/badge/tests-212%20passing-22863a?style=flat" alt="Tests">
+  <img src="https://img.shields.io/badge/phase-4%20complete-22863a?style=flat" alt="Phase 4">
 </p>
 
 ---
