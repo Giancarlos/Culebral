@@ -1,0 +1,37 @@
+# Lambdas, generators, and functional patterns.
+
+# ─── Generator function using yield ───
+# Generators collect values lazily (eagerly in current implementation).
+
+def fibonacci_gen(limit: int):
+    a = 0
+    b = 1
+    while a < limit:
+        yield a
+        a, b = b, a + b
+
+# ─── Higher-order functions ───
+
+def apply(f, x: int) -> object:
+    return f(x)
+
+def main():
+    # ─── Lambdas ───
+    double = lambda x: x * 2
+    result = apply(double, 21)
+    print(f"double(21) = {result}")     # 42
+
+    # ─── Built-in higher-order functions ───
+    numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    evens = filter(lambda x: x % 2 == 0, numbers)
+    print("evens:", evens)
+
+    doubled = map(lambda x: x * 2, numbers)
+    print("doubled:", doubled)
+
+    # ─── Generators ───
+    print("Fibonacci below 100:")
+    for n in fibonacci_gen(100):
+        print(n, end=" ")
+    print()

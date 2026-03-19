@@ -579,7 +579,7 @@ Properties: `is_ok` (bool), `is_err` (bool), `value` (the wrapped value).
 
 ### Module Resolution
 
-Import resolution follows a search path: project source → `lib/` directory → standard library path. `culebral.*` imports resolve to `.cbl` files on disk. .NET imports (anything else like `System.*`, `Microsoft.*`, NuGet packages) resolve against .NET assembly metadata.
+Import resolution follows a search path: project source → `lib/` directory → standard library path. `culebral.*` imports resolve to `.leb` files on disk. .NET imports (anything else like `System.*`, `Microsoft.*`, NuGet packages) resolve against .NET assembly metadata.
 
 ### Future Modules
 
@@ -594,7 +594,7 @@ Import resolution follows a search path: project source → `lib/` directory →
 The compiler is split at the **CulebralIR** boundary. Everything above the IR is shared across all backends. Everything below is target-specific. This costs almost nothing to implement versus emitting CIL directly, but keeps the door open for future backends.
 
 ```
-Source (.cbl files)
+Source (.leb files)
     │
     ▼
 ┌──────────────┐
@@ -725,9 +725,9 @@ culebral/
 │       ├── TypeCheckerTests.cs
 │       └── EmitTests.cs               # End-to-end: source → assembly → run → assert
 ├── samples/
-│   ├── hello.cbl                       # def main(): print("Hello from Culebral!")
-│   ├── fibonacci.cbl
-│   └── classes.cbl
+│   ├── hello.leb                       # def main(): print("Hello from Culebral!")
+│   ├── fibonacci.leb
+│   └── classes.leb
 ├── culebral.sln
 └── README.md
 ```
@@ -737,7 +737,7 @@ culebral/
 The first program the compiler must handle:
 
 ```python
-# hello.cbl
+# hello.leb
 def main():
     print("Hello from Culebral!")
 ```
@@ -780,14 +780,14 @@ dotnet add tests/Culebral.Compiler.Tests reference src/Culebral.Compiler
 dotnet build
 
 # Compile a Culebral program
-dotnet run --project src/Culebral.Compiler -- build samples/hello.cbl
+dotnet run --project src/Culebral.Compiler -- build samples/hello.leb
 
 # Run the output
 dotnet samples/hello.dll
 
 # Eventually, once installed as a tool:
-culebral build hello.cbl
-culebral run hello.cbl
+culebral build hello.leb
+culebral run hello.leb
 ```
 
 ### Phase Plan
@@ -890,7 +890,7 @@ Native modules allow performance-critical code to compile to native binaries via
 ### Syntax
 
 ```python
-# app.cbl — compiles to .NET as usual
+# app.leb — compiles to .NET as usual
 from engine import process_frame
 
 async def main():
@@ -900,7 +900,7 @@ async def main():
 ```
 
 ```python
-# engine.cbl — native module
+# engine.leb — native module
 @native
 module engine:
 
@@ -913,7 +913,7 @@ module engine:
 ### How It Works
 
 1. Compiler sees `@native` annotation on a module
-2. `engine.cbl` is compiled through the LLVM backend → shared library (`engine.so` / `engine.dll` / `engine.dylib`)
+2. `engine.leb` is compiled through the LLVM backend → shared library (`engine.so` / `engine.dll` / `engine.dylib`)
 3. Compiler auto-generates P/Invoke bridge on the .NET side (user never writes `DllImport`)
 4. `culebral build` runs both backends and links outputs together
 
@@ -943,7 +943,7 @@ target = "net10.0"
 "Newtonsoft.Json" = "13.0.3"
 
 [modules.native]
-engine = { path = "engine.cbl" }
+engine = { path = "engine.leb" }
 
 [dependencies.native]
 libcurl = { ffi = true }
@@ -1012,7 +1012,7 @@ typed_fn: Func[int, str] = lambda x: str(x)
 
 ### 4.2 `with` Statement → IDisposable / try-finally
 
-**Status:** Parsed in AST. Lowering skips it (emits warning CBL3001). Not functional.
+**Status:** Parsed in AST. Lowering skips it (emits warning LEB3001). Not functional.
 
 **What it does:** The `with` statement ensures deterministic resource cleanup by calling `Dispose()` when the block exits, regardless of exceptions.
 
@@ -1239,7 +1239,7 @@ class <GenExpr>d__0 : IEnumerable<T>, IEnumerator<T> {
 
 ### 4.6 Yield Statement (Generator Functions)
 
-**Status:** Parsed in AST (`YieldStatement`). Lowering skips it (emits warning CBL3001). Not functional.
+**Status:** Parsed in AST (`YieldStatement`). Lowering skips it (emits warning LEB3001). Not functional.
 
 **What it does:** `yield` turns a function into a generator — a lazy sequence producer.
 
@@ -2471,7 +2471,7 @@ These Python built-ins conflict with Culebral's design principles or have no mea
 - Generate a `.pdb` file alongside the `.dll`
 
 **Why this matters:**
-- Without PDB files, debugging a Culebral program means reading CIL disassembly. With PDB files, you set breakpoints on `.cbl` source lines and step through in your IDE.
+- Without PDB files, debugging a Culebral program means reading CIL disassembly. With PDB files, you set breakpoints on `.leb` source lines and step through in your IDE.
 - This is a developer experience force multiplier. It makes Culebral programs first-class citizens in the .NET debugging ecosystem.
 
 ---
@@ -2958,7 +2958,7 @@ These Python features are **intentionally excluded** from Culebral. This is not 
 
 ## Open Questions
 
-1. **File extension:** `.cbl` (short, clean) or `.skel`?
+1. **File extension:** `.leb` (short, clean) or `.skel`?
 2. **Package manager:** Wrap `dotnet` CLI, or custom tooling?
 3. **REPL:** Worth building early? Good for adoption, but tricky with static types.
 4. **String type:** Use `System.String` directly, or wrap it for Python-like methods (`s.upper()` vs `s.ToUpper()`)?

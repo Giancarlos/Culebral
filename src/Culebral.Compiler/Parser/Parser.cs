@@ -122,7 +122,7 @@ public sealed class CulebralParser
         Advance(); // consume 'async'
         if (Current.Kind != TokenKind.KwDef)
         {
-            _diagnostics.Error("CBL1001", "Expected 'def' after 'async'", Current.Span);
+            _diagnostics.Error("LEB1001", "Expected 'def' after 'async'", Current.Span);
             return new PassStatement(SourceSpan.From(start));
         }
         return ParseFunctionDef(isAsync: true);
@@ -373,7 +373,7 @@ public sealed class CulebralParser
             }
             else
             {
-                _diagnostics.Error("CBL1002", "Expected 'get' or 'set' in property definition", Current.Span);
+                _diagnostics.Error("LEB1002", "Expected 'get' or 'set' in property definition", Current.Span);
                 Advance();
             }
 
@@ -459,7 +459,7 @@ public sealed class CulebralParser
             return cls;
         }
 
-        _diagnostics.Error("CBL1003", "Decorator must be followed by a function or class definition", Current.Span);
+        _diagnostics.Error("LEB1003", "Decorator must be followed by a function or class definition", Current.Span);
         return new PassStatement(Current.Span);
     }
 
@@ -747,7 +747,7 @@ public sealed class CulebralParser
             return new NamePattern(name, new SourceSpan(start, CurrentLocation()));
         }
 
-        _diagnostics.Error("CBL1004", $"Unexpected token in pattern: {Current.Kind}", Current.Span);
+        _diagnostics.Error("LEB1004", $"Unexpected token in pattern: {Current.Kind}", Current.Span);
         Advance();
         return new WildcardPattern(SourceSpan.From(start));
     }
@@ -1358,7 +1358,7 @@ public sealed class CulebralParser
                 return ParseDictOrSet();
 
             default:
-                _diagnostics.Error("CBL1005", $"Unexpected token: {tok.Kind} '{tok.Lexeme}'", tok.Span);
+                _diagnostics.Error("LEB1005", $"Unexpected token: {tok.Kind} '{tok.Lexeme}'", tok.Span);
                 Advance();
                 return new NoneLiteralExpr(tok.Span);
         }
@@ -1750,7 +1750,7 @@ public sealed class CulebralParser
         if (Current.Kind == TokenKind.Indent)
             Advance();
         else if (Current.Kind != TokenKind.EndOfFile)
-            _diagnostics.Error("CBL1006", "Expected indented block", Current.Span);
+            _diagnostics.Error("LEB1006", "Expected indented block", Current.Span);
     }
 
     // ─── Token Helpers ───
@@ -1780,7 +1780,7 @@ public sealed class CulebralParser
             return tok;
         }
 
-        _diagnostics.Error("CBL1007", $"Expected {kind}, got {Current.Kind} '{Current.Lexeme}'", Current.Span);
+        _diagnostics.Error("LEB1007", $"Expected {kind}, got {Current.Kind} '{Current.Lexeme}'", Current.Span);
         return Current;
     }
 

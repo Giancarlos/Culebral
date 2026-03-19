@@ -49,7 +49,7 @@ public sealed class NuGetResolver
             var assetsPath = Path.Combine(tempDir, "obj", "project.assets.json");
             if (!File.Exists(assetsPath))
             {
-                _diagnostics.Error("CBL5001", "NuGet restore did not produce an assets file",
+                _diagnostics.Error("LEB5001", "NuGet restore did not produce an assets file",
                     new SourceSpan(default, default));
                 return false;
             }
@@ -65,7 +65,7 @@ public sealed class NuGetResolver
                 }
                 catch (Exception ex)
                 {
-                    _diagnostics.Warning("CBL5002",
+                    _diagnostics.Warning("LEB5002",
                         $"Could not load NuGet assembly '{Path.GetFileName(asmPath)}': {ex.Message}",
                         new SourceSpan(default, default));
                 }
@@ -75,7 +75,7 @@ public sealed class NuGetResolver
         }
         catch (Exception ex)
         {
-            _diagnostics.Error("CBL5000", $"NuGet resolution failed: {ex.Message}",
+            _diagnostics.Error("LEB5000", $"NuGet resolution failed: {ex.Message}",
                 new SourceSpan(default, default));
             return false;
         }
@@ -137,7 +137,7 @@ public sealed class NuGetResolver
         using var process = Process.Start(psi);
         if (process is null)
         {
-            _diagnostics.Error("CBL5003", "Failed to start 'dotnet restore'",
+            _diagnostics.Error("LEB5003", "Failed to start 'dotnet restore'",
                 new SourceSpan(default, default));
             return false;
         }
@@ -147,7 +147,7 @@ public sealed class NuGetResolver
         if (!process.HasExited)
         {
             process.Kill(true);
-            _diagnostics.Error("CBL5004", "NuGet restore timed out after 60 seconds",
+            _diagnostics.Error("LEB5004", "NuGet restore timed out after 60 seconds",
                 new SourceSpan(default, default));
             return false;
         }
@@ -155,7 +155,7 @@ public sealed class NuGetResolver
         if (process.ExitCode != 0)
         {
             var stderr = process.StandardError.ReadToEnd();
-            _diagnostics.Error("CBL5005", $"NuGet restore failed: {stderr.Trim()}",
+            _diagnostics.Error("LEB5005", $"NuGet restore failed: {stderr.Trim()}",
                 new SourceSpan(default, default));
             return false;
         }
@@ -223,7 +223,7 @@ public sealed class NuGetResolver
         }
         catch (Exception ex)
         {
-            _diagnostics.Warning("CBL5006",
+            _diagnostics.Warning("LEB5006",
                 $"Failed to parse NuGet assets file: {ex.Message}",
                 new SourceSpan(default, default));
         }

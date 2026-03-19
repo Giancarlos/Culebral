@@ -210,7 +210,7 @@ public sealed class CulebralLexer
             EmitDedentsToLevel(indent);
             if (_indentStack.Peek() != indent)
             {
-                _diagnostics.Error("CBL0001", $"Inconsistent indentation: expected {_indentStack.Peek()} spaces, got {indent}",
+                _diagnostics.Error("LEB0001", $"Inconsistent indentation: expected {_indentStack.Peek()} spaces, got {indent}",
                     SourceSpan.From(loc));
             }
         }
@@ -297,7 +297,7 @@ public sealed class CulebralLexer
             }
             else if (!isTriple && (Current == '\n' || Current == '\r'))
             {
-                _diagnostics.Error("CBL0002", "Unterminated string literal", new SourceSpan(start, CurrentLocation()));
+                _diagnostics.Error("LEB0002", "Unterminated string literal", new SourceSpan(start, CurrentLocation()));
                 break;
             }
             else
@@ -309,7 +309,7 @@ public sealed class CulebralLexer
 
         if (_pos >= _source.Length)
         {
-            _diagnostics.Error("CBL0002", "Unterminated string literal", new SourceSpan(start, CurrentLocation()));
+            _diagnostics.Error("LEB0002", "Unterminated string literal", new SourceSpan(start, CurrentLocation()));
         }
 
         return MakeToken(TokenKind.StringLiteral, sb.ToString(), new SourceSpan(start, CurrentLocation()));
@@ -348,7 +348,7 @@ public sealed class CulebralLexer
             }
             else if (Current == '\n' || Current == '\r')
             {
-                _diagnostics.Error("CBL0002", "Unterminated f-string literal", new SourceSpan(start, CurrentLocation()));
+                _diagnostics.Error("LEB0002", "Unterminated f-string literal", new SourceSpan(start, CurrentLocation()));
                 break;
             }
             else
@@ -361,7 +361,7 @@ public sealed class CulebralLexer
         if (_pos < _source.Length && Current == quote)
             Advance();
         else
-            _diagnostics.Error("CBL0002", "Unterminated f-string literal", new SourceSpan(start, CurrentLocation()));
+            _diagnostics.Error("LEB0002", "Unterminated f-string literal", new SourceSpan(start, CurrentLocation()));
 
         return MakeToken(TokenKind.FStringLiteral, sb.ToString(), new SourceSpan(start, CurrentLocation()));
     }
@@ -421,7 +421,7 @@ public sealed class CulebralLexer
             if (double.TryParse(cleanText, System.Globalization.CultureInfo.InvariantCulture, out var value))
                 return MakeToken(TokenKind.FloatLiteral, text, span) with { LiteralValue = value };
 
-            _diagnostics.Error("CBL0003", $"Invalid float literal: {text}", span);
+            _diagnostics.Error("LEB0003", $"Invalid float literal: {text}", span);
             return MakeToken(TokenKind.FloatLiteral, text, span) with { LiteralValue = 0.0 };
         }
         else
@@ -429,7 +429,7 @@ public sealed class CulebralLexer
             if (long.TryParse(cleanText, out var value))
                 return MakeToken(TokenKind.IntegerLiteral, text, span) with { LiteralValue = value };
 
-            _diagnostics.Error("CBL0003", $"Invalid integer literal: {text}", span);
+            _diagnostics.Error("LEB0003", $"Invalid integer literal: {text}", span);
             return MakeToken(TokenKind.IntegerLiteral, text, span) with { LiteralValue = 0L };
         }
     }
@@ -572,7 +572,7 @@ public sealed class CulebralLexer
 
             case '!':
                 if (TryConsume('=')) return MakeToken(TokenKind.NotEqual, "!=", new SourceSpan(start, CurrentLocation()));
-                _diagnostics.Error("CBL0004", "Unexpected character '!'", SourceSpan.From(start));
+                _diagnostics.Error("LEB0004", "Unexpected character '!'", SourceSpan.From(start));
                 return NextToken();
 
             case '<':
@@ -594,7 +594,7 @@ public sealed class CulebralLexer
                 return MakeToken(TokenKind.GreaterThan, ">", SourceSpan.From(start));
 
             default:
-                _diagnostics.Error("CBL0004", $"Unexpected character '{ch}'", SourceSpan.From(start));
+                _diagnostics.Error("LEB0004", $"Unexpected character '{ch}'", SourceSpan.From(start));
                 return NextToken();
         }
     }

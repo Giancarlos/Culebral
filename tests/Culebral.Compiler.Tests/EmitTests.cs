@@ -23,7 +23,7 @@ public class EmitTests : IDisposable
 
     private string? CompileAndRun(string source)
     {
-        var skvPath = Path.Combine(_tempDir, "test.cbl");
+        var skvPath = Path.Combine(_tempDir, "test.leb");
         var dllPath = Path.Combine(_tempDir, "test.dll");
         File.WriteAllText(skvPath, source);
 
@@ -1431,7 +1431,7 @@ public class EmitTests : IDisposable
     [Fact]
     public void CompilationDiagnostics_ReportErrors()
     {
-        var skvPath = Path.Combine(_tempDir, "bad.cbl");
+        var skvPath = Path.Combine(_tempDir, "bad.leb");
         var dllPath = Path.Combine(_tempDir, "bad.dll");
         // Source with unclosed string
         File.WriteAllText(skvPath, "def main():\n    print(\"unclosed\n");
@@ -2359,7 +2359,7 @@ public class EmitTests : IDisposable
             def main():
                 print(greet("world"))
             """;
-        var skvPath = Path.Combine(_tempDir, "test_decorator.cbl");
+        var skvPath = Path.Combine(_tempDir, "test_decorator.leb");
         var dllPath = Path.Combine(_tempDir, "test_decorator.dll");
         File.WriteAllText(skvPath, source);
 
@@ -2458,14 +2458,14 @@ public class EmitTests : IDisposable
                 x: Box[int] = Box(42)
                 pass
             """;
-        var skvPath = Path.Combine(_tempDir, "test_constraint_violation.cbl");
+        var skvPath = Path.Combine(_tempDir, "test_constraint_violation.leb");
         var dllPath = Path.Combine(_tempDir, "test_constraint_violation.dll");
         File.WriteAllText(skvPath, source);
 
         var result = Program.Compile(skvPath, dllPath);
         // Should fail compilation due to constraint violation
         Assert.False(result.Success, "Expected compilation to fail due to constraint violation");
-        Assert.Contains("CBL2020", result.Diagnostics.FormatAll());
+        Assert.Contains("LEB2020", result.Diagnostics.FormatAll());
     }
 
     [Fact]

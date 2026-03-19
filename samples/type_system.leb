@@ -1,0 +1,45 @@
+# Type system features — type aliases, generics, is/in operators.
+
+# ─── Type aliases (compile-time, zero overhead) ───
+type UserId = int
+type Email = str
+
+# ─── Generics with constraints ───
+# T: Describable means T must implement the Describable interface.
+
+interface Describable:
+    def describe() -> str
+
+class Box[T: Describable]:
+    value: T
+
+    def __init__(value: T):
+        @value = value
+
+    def show() -> str:
+        return f"Box containing: {value.describe()}"
+
+# ─── is / in operators ───
+
+def check_types(x: object):
+    if x is int:
+        print(f"{x} is an int")
+    elif x is str:
+        print(f"{x} is a string")
+    else:
+        print("unknown type")
+
+def main():
+    # Type aliases
+    id: UserId = 42
+    email: Email = "hello@culebral.dev"
+    print(f"User {id}: {email}")
+
+    # is operator (runtime type check)
+    check_types(42)
+    check_types("hello")
+
+    # in operator (collection membership)
+    items = [10, 20, 30, 40, 50]
+    print(f"30 in items: {30 in items}")
+    print(f"99 in items: {99 in items}")

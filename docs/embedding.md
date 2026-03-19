@@ -27,7 +27,7 @@ engine.Execute("""
 int damage = engine.Eval<int>("player.attack * 2 + weapon.bonus");
 
 // Load and run a script file
-engine.ExecuteFile("scripts/on_player_death.cbl");
+engine.ExecuteFile("scripts/on_player_death.leb");
 
 // Register a C# function callable from scripts
 engine.SetFunction("spawn_enemy", (string type, int level) => {
@@ -41,12 +41,12 @@ This is how Lua works in games, how Python works in Blender, and how JavaScript 
 
 ## What Needs to Change
 
-The current compiler is a **CLI tool** that reads `.cbl` files, produces `.dll` assemblies, and writes them to disk. Embedding requires an **in-process API** that compiles and executes code without touching the filesystem.
+The current compiler is a **CLI tool** that reads `.leb` files, produces `.dll` assemblies, and writes them to disk. Embedding requires an **in-process API** that compiles and executes code without touching the filesystem.
 
 ### Current Architecture
 
 ```
-Source (.cbl file on disk)
+Source (.leb file on disk)
     → Lexer → Parser → TypeChecker → IR Lowering → CIL Emitter
         → .dll file on disk
             → dotnet <file>.dll (separate process)
@@ -361,11 +361,11 @@ engine.SetFunction("move_to", (float x, float y) => npc.MoveTo(x, y));
 engine.SetFunction("attack", (Entity target) => npc.Attack(target));
 engine.SetFunction("say", (string text) => DialogueSystem.Show(npc, text));
 
-engine.ExecuteFile($"scripts/npcs/{npc.ScriptName}.cbl");
+engine.ExecuteFile($"scripts/npcs/{npc.ScriptName}.leb");
 ```
 
 ```python
-# scripts/npcs/guard.cbl
+# scripts/npcs/guard.leb
 distance = abs(self.position.x - player.position.x)
 
 if distance < 5.0:
@@ -413,11 +413,11 @@ var engine = new CulebralEngine(new CulebralEngineOptions {
 engine.SetFunction("log", (string msg) => Console.WriteLine($"[BUILD] {msg}"));
 engine.SetFunction("run", (string cmd) => Process.Start("bash", $"-c \"{cmd}\"").WaitForExit());
 
-engine.ExecuteFile("build.cbl");
+engine.ExecuteFile("build.leb");
 ```
 
 ```python
-# build.cbl
+# build.leb
 from System.IO import Directory, File
 
 log("Cleaning output...")
@@ -466,7 +466,7 @@ engine.SetFunction("send_message", (string channel, string text) => {
 });
 
 // Load user plugins
-foreach (var pluginFile in Directory.GetFiles("plugins", "*.cbl"))
+foreach (var pluginFile in Directory.GetFiles("plugins", "*.leb"))
 {
     try {
         engine.ExecuteFile(pluginFile);

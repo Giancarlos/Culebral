@@ -1,0 +1,37 @@
+# Interfaces — abstract contracts that classes must implement.
+# Interfaces can have default method implementations.
+
+interface Describable:
+    def describe() -> str
+
+interface Greeting:
+    def greet() -> str:
+        return "Hello!"     # default implementation — classes get this for free
+
+class Dog(Describable, Greeting):
+    name: str = ""
+
+    def __init__(name: str):
+        @name = name
+
+    def describe() -> str:
+        return f"Dog named {@name}"
+
+    # greet() is inherited from Greeting with the default implementation
+
+class Cat(Describable):
+    name: str = ""
+
+    def __init__(name: str):
+        @name = name
+
+    def describe() -> str:
+        return f"Cat named {@name}"
+
+def main():
+    d = Dog("Rex")
+    print(d.describe())     # "Dog named Rex"
+    print(d.greet())        # "Hello!" (default from interface)
+
+    c = Cat("Whiskers")
+    print(c.describe())     # "Cat named Whiskers"

@@ -1,0 +1,43 @@
+# Classes, structs, and enums.
+#
+# Classes are reference types (heap allocated).
+# Structs are value types (stack allocated, copied on assignment).
+# Enums are algebraic data types (sealed class hierarchies).
+#
+# No 'self' parameter — use @field to disambiguate when a parameter
+# shadows a field name.
+
+class Counter:
+    count: int = 0
+
+    def __init__(initial: int = 0):
+        count = initial     # bare name refers to field when unambiguous
+
+    def increment() -> int:
+        count += 1
+        return count
+
+    def reset():
+        count = 0
+
+# Structs are value types — stack allocated, no GC pressure
+struct Point:
+    x: float = 0.0
+    y: float = 0.0
+
+    def __init__(x: float, y: float):
+        @x = x              # @x = explicit field access (parameter shadows field)
+        @y = y
+
+# Enums are algebraic types — each variant can carry different data
+enum Shape:
+    Circle(radius: float)
+    Rectangle(width: float, height: float)
+    Point                   # variant with no data
+
+def main():
+    c = Counter(0)
+    print(f"Count: {c.increment()}")   # 1
+    print(f"Count: {c.increment()}")   # 2
+    c.reset()
+    print(f"After reset: {c.increment()}")  # 1

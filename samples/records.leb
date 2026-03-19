@@ -1,0 +1,26 @@
+# Records — immutable data types with structural equality and with-expressions.
+#
+# Records are like Python's dataclasses but immutable by default.
+# Use 'with' to create modified copies without mutating the original.
+
+record User:
+    name: str = ""
+    email: str = ""
+    age: int = 0
+
+    def __init__(name: str, email: str, age: int):
+        @name = name
+        @email = email
+        @age = age
+
+    def __str__() -> str:
+        return f"User({@name}, {@email}, age={@age})"
+
+def main():
+    alice = User("Alice", "alice@example.com", 30)
+    print(alice)
+
+    # 'with' creates a modified copy — alice is unchanged
+    bob = alice with (name="Bob", email="bob@example.com")
+    print(bob)
+    print(f"Alice unchanged: {alice}")

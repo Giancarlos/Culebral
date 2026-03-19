@@ -500,7 +500,7 @@ public sealed class TypeChecker
                 // Reassignment — check type compatibility
                 if (!IsAssignable(valueType, existing.Type))
                 {
-                    _diagnostics.Error("CBL2001",
+                    _diagnostics.Error("LEB2001",
                         $"Cannot assign {valueType.DisplayName} to variable '{ident.Name}' of type {existing.Type.DisplayName}",
                         assign.Span);
                 }
@@ -541,7 +541,7 @@ public sealed class TypeChecker
                     {
                         if (!IsAssignable(elemType, existing.Type))
                         {
-                            _diagnostics.Error("CBL2001",
+                            _diagnostics.Error("LEB2001",
                                 $"Cannot assign {elemType.DisplayName} to variable '{targetIdent.Name}' of type {existing.Type.DisplayName}",
                                 assign.Span);
                         }
@@ -569,7 +569,7 @@ public sealed class TypeChecker
             var valueType = InferType(annotated.Value);
             if (!IsAssignable(valueType, declaredType))
             {
-                _diagnostics.Error("CBL2002",
+                _diagnostics.Error("LEB2002",
                     $"Cannot assign {valueType.DisplayName} to '{annotated.Name}' of declared type {declaredType.DisplayName}",
                     annotated.Span);
             }
@@ -658,7 +658,7 @@ public sealed class TypeChecker
             }
             else
             {
-                _diagnostics.Warning("CBL2010",
+                _diagnostics.Warning("LEB2010",
                     $"Cannot resolve .NET type '{fullTypeName}'", fromImport.Span);
             }
         }
@@ -761,7 +761,7 @@ public sealed class TypeChecker
         var symbol = _currentScope.Lookup(ident.Name);
         if (symbol is null)
         {
-            _diagnostics.Error("CBL2003", $"Undefined name '{ident.Name}'", ident.Span);
+            _diagnostics.Error("LEB2003", $"Undefined name '{ident.Name}'", ident.Span);
             return ErrorType.Instance;
         }
         return symbol.Type;
@@ -773,7 +773,7 @@ public sealed class TypeChecker
         var symbol = _currentScope.Lookup(field.FieldName);
         if (symbol is null)
         {
-            _diagnostics.Error("CBL2004", $"Undefined field '@{field.FieldName}'", field.Span);
+            _diagnostics.Error("LEB2004", $"Undefined field '@{field.FieldName}'", field.Span);
             return ErrorType.Instance;
         }
         return symbol.Type;
@@ -1143,7 +1143,7 @@ public sealed class TypeChecker
         if (_knownTypeParams.Contains(name))
             return new TypeParameterType(name);
 
-        _diagnostics.Error("CBL2005", $"Unknown type '{name}'", SourceSpan.None);
+        _diagnostics.Error("LEB2005", $"Unknown type '{name}'", SourceSpan.None);
         return ErrorType.Instance;
     }
 
@@ -1230,7 +1230,7 @@ public sealed class TypeChecker
             // Primitive types don't implement user-defined interfaces
             if (typeArg is PrimitiveType)
             {
-                _diagnostics.Error("CBL2020",
+                _diagnostics.Error("LEB2020",
                     $"Type '{typeArg.DisplayName}' does not satisfy constraint '{ifaceConstraint.DisplayName}' on type parameter '{paramName}' of '{typeName}'",
                     span);
             }
@@ -1240,7 +1240,7 @@ public sealed class TypeChecker
             // Primitive types don't inherit from user-defined classes
             if (typeArg is PrimitiveType)
             {
-                _diagnostics.Error("CBL2020",
+                _diagnostics.Error("LEB2020",
                     $"Type '{typeArg.DisplayName}' does not satisfy constraint '{classConstraint.DisplayName}' on type parameter '{paramName}' of '{typeName}'",
                     span);
             }

@@ -6,7 +6,7 @@ namespace Culebral.Compiler.IR;
 // ─── Module (Top-Level Container) ───
 
 /// <summary>
-/// A compiled module — the IR for one .cbl file.
+/// A compiled module — the IR for one .leb file.
 /// Contains type definitions, function definitions, and module-level code.
 /// </summary>
 public sealed class IrModule

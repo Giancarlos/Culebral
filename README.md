@@ -28,7 +28,7 @@ def main():
 ```
 
 ```
-$ culebral run fibonacci.cbl
+$ culebral run fibonacci.leb
 fib(0) = 0
 fib(1) = 1
 fib(2) = 1
@@ -62,13 +62,13 @@ cd Culebral
 dotnet build
 
 # Write your first program
-cat > hello.cbl << 'EOF'
+cat > hello.leb << 'EOF'
 def main():
     print("Hello from Culebral!")
 EOF
 
 # Compile and run
-dotnet run --project src/Culebral.Compiler -- run hello.cbl
+dotnet run --project src/Culebral.Compiler -- run hello.leb
 ```
 
 ## The Language
@@ -215,7 +215,7 @@ Indentation blocks · f-strings · comprehensions · slicing · `for x in collec
 ## Architecture
 
 ```
-Source (.cbl)
+Source (.leb)
     │
     ▼
 ┌──────────┐
@@ -261,7 +261,7 @@ culebral/
 │   ├── ParserTests.cs   # 30 tests
 │   ├── TypeCheckerTests.cs  # 10 tests
 │   └── EmitTests.cs     # 20 end-to-end tests
-├── samples/             # Example .cbl programs
+├── samples/             # Example .leb programs
 └── spec.md              # Full language specification
 ```
 
@@ -277,26 +277,26 @@ dotnet build
 dotnet test
 
 # Compile a Culebral program
-dotnet run --project src/Culebral.Compiler -- build samples/hello.cbl
+dotnet run --project src/Culebral.Compiler -- build samples/hello.leb
 
 # Compile and run in one step
-dotnet run --project src/Culebral.Compiler -- run samples/hello.cbl
+dotnet run --project src/Culebral.Compiler -- run samples/hello.leb
 
 # Type-check without compiling
-dotnet run --project src/Culebral.Compiler -- check samples/fibonacci.cbl
+dotnet run --project src/Culebral.Compiler -- check samples/fibonacci.leb
 ```
 
 ### Debug Commands
 
 ```bash
 # Print lexer tokens
-dotnet run --project src/Culebral.Compiler -- lex samples/hello.cbl
+dotnet run --project src/Culebral.Compiler -- lex samples/hello.leb
 
 # Print parse tree
-dotnet run --project src/Culebral.Compiler -- parse samples/hello.cbl
+dotnet run --project src/Culebral.Compiler -- parse samples/hello.leb
 
 # Print CulebralIR
-dotnet run --project src/Culebral.Compiler -- ir samples/fibonacci.cbl
+dotnet run --project src/Culebral.Compiler -- ir samples/fibonacci.leb
 ```
 
 ## Roadmap

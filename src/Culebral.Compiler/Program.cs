@@ -38,7 +38,7 @@ public static class Program
         if (args.Length == 0)
         {
             Console.Error.WriteLine("Error: No input file specified.");
-            Console.Error.WriteLine("Usage: culebral build <file.cbl> [--output <path>]");
+            Console.Error.WriteLine("Usage: culebral build <file.leb> [--output <path>]");
             return 1;
         }
 
@@ -406,12 +406,12 @@ public static class Program
         Console.WriteLine("Usage: culebral <command> [options]");
         Console.WriteLine();
         Console.WriteLine("Commands:");
-        Console.WriteLine("  build <file.cbl>     Compile a Culebral source file to .NET assembly");
-        Console.WriteLine("  run <file.cbl>       Compile and run a Culebral source file");
-        Console.WriteLine("  check <file.cbl>     Type-check without compiling");
-        Console.WriteLine("  lex <file.cbl>       Print lexer tokens (debug)");
-        Console.WriteLine("  parse <file.cbl>     Print parse tree (debug)");
-        Console.WriteLine("  ir <file.cbl>        Print CulebralIR (debug)");
+        Console.WriteLine("  build <file.leb>     Compile a Culebral source file to .NET assembly");
+        Console.WriteLine("  run <file.leb>       Compile and run a Culebral source file");
+        Console.WriteLine("  check <file.leb>     Type-check without compiling");
+        Console.WriteLine("  lex <file.leb>       Print lexer tokens (debug)");
+        Console.WriteLine("  parse <file.leb>     Print parse tree (debug)");
+        Console.WriteLine("  ir <file.leb>        Print CulebralIR (debug)");
         Console.WriteLine();
         Console.WriteLine("Options:");
         Console.WriteLine("  --output, -o <path>  Output file path");

@@ -1054,7 +1054,7 @@ public sealed class IrLowering
                 break; // Handled at module level or compile-time only
 
             default:
-                _diagnostics.Warning("CBL3001", $"Unhandled statement type in lowering: {stmt.GetType().Name}", stmt.Span);
+                _diagnostics.Warning("LEB3001", $"Unhandled statement type in lowering: {stmt.GetType().Name}", stmt.Span);
                 break;
         }
     }

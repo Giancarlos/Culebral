@@ -1,0 +1,39 @@
+# Language basics — variables, arithmetic, strings, f-strings.
+#
+# Local variable types are inferred from their first assignment.
+# Function parameters and return types are always explicit.
+
+def square(x: int) -> int:
+    return x * x
+
+def greet(name: str) -> str:
+    return f"Hello, {name}!"
+
+def main():
+    # Variables — type is inferred
+    x = 42
+    pi = 3.14159
+    name = "Culebral"
+    active = True
+
+    # Arithmetic
+    print(10 + 3)       # 13
+    print(10 - 3)       # 7
+    print(10 * 3)       # 30
+    print(10 / 3)       # 3.333... (true division — always float)
+    print(10 // 3)      # 3 (floor division — always int)
+    print(10 % 3)       # 1 (modulo)
+    print(2 ** 10)      # 1024 (power)
+
+    # Strings and f-strings
+    print(greet(name))                  # "Hello, Culebral!"
+    print(f"{name} has {len(name)} characters")
+
+    # Nested function calls
+    print(f"square(5) = {square(5)}")   # 25
+
+    # Multiple print args (Python-compatible)
+    print("x =", x, "pi =", pi)
+    print("a", "b", "c", sep="-")       # a-b-c
+    print("no newline", end="")
+    print(" — continues here")

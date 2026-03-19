@@ -1,0 +1,17 @@
+# The 'with' statement — deterministic resource cleanup.
+#
+# Maps to .NET's IDisposable pattern (like C#'s 'using').
+# The resource's Dispose() is called automatically when the block exits,
+# even if an exception occurs.
+
+from System.Text import StringBuilder
+
+def main():
+    # 'with' ensures Dispose() is called on block exit
+    with StringBuilder() as sb:
+        sb.append("Hello")
+        sb.append(", ")
+        sb.append("World!")
+        print(sb.to_string())
+
+    print("StringBuilder disposed — cleanup guaranteed")

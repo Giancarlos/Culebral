@@ -108,12 +108,12 @@ The compiler implements a full pipeline: Source → Lexer → Parser → Type Ch
 - Extension method emission as static calls with auto-boxing
 
 ### CLI (`Program.cs`)
-- `culebral build <file.cbl>` — compile to .dll
-- `culebral run <file.cbl>` — compile and execute
-- `culebral check <file.cbl>` — type-check only
-- `culebral lex <file.cbl>` — debug token output
-- `culebral parse <file.cbl>` — debug AST output
-- `culebral ir <file.cbl>` — debug IR output
+- `culebral build <file.leb>` — compile to .dll
+- `culebral run <file.leb>` — compile and execute
+- `culebral check <file.leb>` — type-check only
+- `culebral lex <file.leb>` — debug token output
+- `culebral parse <file.leb>` — debug AST output
+- `culebral ir <file.leb>` — debug IR output
 - Auto-discovery of `culebral.toml` for NuGet resolution
 
 ### NuGet (`NuGet/`)

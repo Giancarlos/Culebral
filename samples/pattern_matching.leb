@@ -1,0 +1,28 @@
+# Pattern matching — match/case with type patterns, guards, and wildcards.
+
+def describe(value: object) -> str:
+    match value:
+        case int(n) if n > 0:
+            return f"positive int: {n}"
+        case int(n):
+            return f"non-positive int: {n}"
+        case str(s):
+            return f"string of length {len(s)}"
+        case None:
+            return "nothing"
+        case _:
+            return "something else"
+
+# ─── Algebraic enums with pattern matching ───
+
+enum Command:
+    Quit
+    Say(message: str)
+    Move(x: int, y: int)
+
+def main():
+    # Type-based matching with guards
+    print(describe(42))       # "positive int: 42"
+    print(describe(-5))       # "non-positive int: -5"
+    print(describe("hello"))  # "string of length 5"
+    print(describe(None))     # "nothing"

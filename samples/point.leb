@@ -1,0 +1,53 @@
+# Operator overloading via dunder methods.
+#
+# Define __add__, __eq__, __str__, __len__, etc. on your classes
+# and they map to .NET operator overloads and method overrides.
+
+class Vector:
+    x: int = 0
+    y: int = 0
+
+    def __init__(x: int, y: int):
+        @x = x
+        @y = y
+
+    # + operator — compiles to op_Addition
+    def __add__(other: Vector) -> Vector:
+        return Vector(@x + other.x, @y + other.y)
+
+    # == operator — compiles to Equals override
+    def __eq__(other: Vector) -> bool:
+        return @x == other.x and @y == other.y
+
+    # str() and print() — compiles to ToString override
+    def __str__() -> str:
+        return f"({@x}, {@y})"
+
+    # len() support
+    def __len__() -> int:
+        return 2
+
+    # indexing support — v[0] returns x, v[1] returns y
+    def __getitem__(index: int) -> int:
+        if index == 0:
+            return @x
+        return @y
+
+def main():
+    a = Vector(1, 2)
+    b = Vector(3, 4)
+
+    # Arithmetic via __add__
+    c = a.__add__(b)
+    print(f"a + b = {c}")          # (4, 6)
+
+    # Equality via __eq__
+    print(a.__eq__(Vector(1, 2)))  # True
+    print(a.__eq__(b))             # False
+
+    # len() via __len__
+    print(f"len = {len(a)}")       # 2
+
+    # Indexing via __getitem__
+    print(f"a[0] = {a[0]}")       # 1
+    print(f"a[1] = {a[1]}")       # 2

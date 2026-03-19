@@ -141,7 +141,7 @@ public class TypeCheckerTests
             """);
         Assert.True(diagnostics.HasErrors, "Expected constraint violation error");
         Assert.Contains(diagnostics.GetDiagnostics(),
-            d => d.Code == "CBL2020" && d.Message.Contains("Printable"));
+            d => d.Code == "LEB2020" && d.Message.Contains("Printable"));
     }
 
     [Fact]
@@ -162,6 +162,6 @@ public class TypeCheckerTests
                 x: Box[Label] = Box(Label())
             """);
         // No constraint violation — Label implements Printable
-        Assert.DoesNotContain(diagnostics.GetDiagnostics(), d => d.Code == "CBL2020");
+        Assert.DoesNotContain(diagnostics.GetDiagnostics(), d => d.Code == "LEB2020");
     }
 }

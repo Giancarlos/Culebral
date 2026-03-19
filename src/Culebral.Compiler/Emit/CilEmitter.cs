@@ -48,7 +48,7 @@ public sealed class CilEmitter
         }
         catch (Exception ex)
         {
-            _diagnostics.Error("CBL4000", $"CIL emission failed: {ex.Message}", SourceSpan.None);
+            _diagnostics.Error("LEB4000", $"CIL emission failed: {ex.Message}", SourceSpan.None);
             return false;
         }
     }
@@ -960,7 +960,7 @@ public sealed class CilEmitter
                 if (method is not null)
                     il.Emit(OpCodes.Call, method);
                 else
-                    _diagnostics.Error("CBL4010", $"Cannot resolve .NET method {type.Name}.{mname}", instr.Span);
+                    _diagnostics.Error("LEB4010", $"Cannot resolve .NET method {type.Name}.{mname}", instr.Span);
                 break;
             }
 
@@ -970,7 +970,7 @@ public sealed class CilEmitter
                 if (method is not null)
                     il.Emit(OpCodes.Callvirt, method);
                 else
-                    _diagnostics.Error("CBL4011", $"Cannot resolve .NET instance method {type.Name}.{mname}", instr.Span);
+                    _diagnostics.Error("LEB4011", $"Cannot resolve .NET instance method {type.Name}.{mname}", instr.Span);
                 break;
             }
 
@@ -981,7 +981,7 @@ public sealed class CilEmitter
                 if (prop?.GetGetMethod() is { } getter)
                     il.Emit(isStatic ? OpCodes.Call : OpCodes.Callvirt, getter);
                 else
-                    _diagnostics.Error("CBL4012", $"Cannot resolve .NET property {type.Name}.{pname}", instr.Span);
+                    _diagnostics.Error("LEB4012", $"Cannot resolve .NET property {type.Name}.{pname}", instr.Span);
                 break;
             }
 
@@ -992,7 +992,7 @@ public sealed class CilEmitter
                 if (field is not null)
                     il.Emit(isStatic ? OpCodes.Ldsfld : OpCodes.Ldfld, field);
                 else
-                    _diagnostics.Error("CBL4013", $"Cannot resolve .NET field {type.Name}.{fname}", instr.Span);
+                    _diagnostics.Error("LEB4013", $"Cannot resolve .NET field {type.Name}.{fname}", instr.Span);
                 break;
             }
 
@@ -1003,7 +1003,7 @@ public sealed class CilEmitter
                 if (ctor is not null)
                     il.Emit(OpCodes.Newobj, ctor);
                 else
-                    _diagnostics.Error("CBL4014", $"Cannot resolve .NET constructor for {type.Name} with {argc} args", instr.Span);
+                    _diagnostics.Error("LEB4014", $"Cannot resolve .NET constructor for {type.Name} with {argc} args", instr.Span);
                 break;
             }
 
@@ -1018,7 +1018,7 @@ public sealed class CilEmitter
                     il.Emit(OpCodes.Call, closed);
                 }
                 else
-                    _diagnostics.Error("CBL4015", $"Cannot resolve generic .NET method {type.Name}.{mname}<{string.Join(", ", typeArgs.Select(t => t.Name))}>", instr.Span);
+                    _diagnostics.Error("LEB4015", $"Cannot resolve generic .NET method {type.Name}.{mname}<{string.Join(", ", typeArgs.Select(t => t.Name))}>", instr.Span);
                 break;
             }
 
@@ -1031,7 +1031,7 @@ public sealed class CilEmitter
                     il.Emit(OpCodes.Callvirt, closed);
                 }
                 else
-                    _diagnostics.Error("CBL4016", $"Cannot resolve generic .NET instance method {type.Name}.{mname}<{string.Join(", ", typeArgs.Select(t => t.Name))}>", instr.Span);
+                    _diagnostics.Error("LEB4016", $"Cannot resolve generic .NET instance method {type.Name}.{mname}<{string.Join(", ", typeArgs.Select(t => t.Name))}>", instr.Span);
                 break;
             }
 
@@ -1050,7 +1050,7 @@ public sealed class CilEmitter
                         il.Emit(OpCodes.Box, method.ReturnType);
                 }
                 else
-                    _diagnostics.Error("CBL4017", $"Cannot resolve extension method {extType.Name}.{mname}", instr.Span);
+                    _diagnostics.Error("LEB4017", $"Cannot resolve extension method {extType.Name}.{mname}", instr.Span);
                 break;
             }
 
@@ -1080,7 +1080,7 @@ public sealed class CilEmitter
                 }
                 else
                 {
-                    _diagnostics.Warning("CBL4020", $"Cannot resolve lambda method '{mname}'", instr.Span);
+                    _diagnostics.Warning("LEB4020", $"Cannot resolve lambda method '{mname}'", instr.Span);
                     il.Emit(OpCodes.Ldnull);
                 }
                 break;
@@ -1926,7 +1926,7 @@ public sealed class CilEmitter
 
             default:
                 // Unknown builtin — emit a nop and warning
-                _diagnostics.Warning("CBL4001", $"Unknown builtin function '{name}'", SourceSpan.None);
+                _diagnostics.Warning("LEB4001", $"Unknown builtin function '{name}'", SourceSpan.None);
                 il.Emit(OpCodes.Pop);
                 il.Emit(OpCodes.Ldnull);
                 break;
@@ -1941,7 +1941,7 @@ public sealed class CilEmitter
         }
         else
         {
-            _diagnostics.Warning("CBL4002", $"Unresolved static call to '{name}'", SourceSpan.None);
+            _diagnostics.Warning("LEB4002", $"Unresolved static call to '{name}'", SourceSpan.None);
             // Pop args and push null
             for (int i = 0; i < argc; i++)
                 il.Emit(OpCodes.Pop);
