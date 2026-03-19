@@ -1217,6 +1217,7 @@ public sealed class IrLowering
         var endLabel = NewBlockLabel("if_end");
 
         LowerExpression(ifStmt.Condition);
+        EmitTruthinessIfNeeded(ifStmt.Condition);
         var firstFalseLabel = ifStmt.Elifs.Count > 0
             ? NewBlockLabel("elif_0")
             : (ifStmt.ElseBody is not null ? elseLabel : endLabel);
@@ -1239,6 +1240,7 @@ public sealed class IrLowering
             _currentBlock = elifBlock;
 
             LowerExpression(elif.Condition);
+            EmitTruthinessIfNeeded(elif.Condition);
             var elifThen = NewBlockLabel($"elif_{i}_then");
             var nextLabel = i + 1 < ifStmt.Elifs.Count
                 ? NewBlockLabel($"elif_{i + 1}")
@@ -1299,6 +1301,7 @@ public sealed class IrLowering
         _currentFunction.Body.Add(condBlock);
         _currentBlock = condBlock;
         LowerExpression(whileStmt.Condition);
+        EmitTruthinessIfNeeded(whileStmt.Condition);
         // When condition is false: go to else check (if else exists) or end
         _currentBlock.Emit(new IrBranchIf(bodyLabel, hasElse ? elseCheckLabel! : endLabel, whileStmt.Span));
 
@@ -1511,15 +1514,23 @@ public sealed class IrLowering
                         numericType = PrimitiveType.Int; // default when both are object
                 }
 
+                var isLogical = binOp is IrBinaryOpKind.LogicalAnd or IrBinaryOpKind.LogicalOr;
+
                 LowerExpression(bin.Left);
                 // Unbox left operand if it's object and we need a numeric type
                 if (numericType is not null && leftType == PrimitiveType.Object)
                     _currentBlock!.Emit(new IrUnbox(numericType, expr.Span));
+                // Truthiness for and/or operands
+                if (isLogical)
+                    EmitTruthinessIfNeeded(bin.Left);
 
                 LowerExpression(bin.Right);
                 // Unbox right operand if it's object and we need a numeric type
                 if (numericType is not null && rightType == PrimitiveType.Object)
                     _currentBlock!.Emit(new IrUnbox(numericType, expr.Span));
+                // Truthiness for and/or operands
+                if (isLogical)
+                    EmitTruthinessIfNeeded(bin.Right);
 
                 // Use the resolved numeric type as the operand type for the binary op
                 var effectiveType = numericType ?? leftType;
@@ -1534,6 +1545,8 @@ public sealed class IrLowering
 
             case UnaryExpr unary:
                 LowerExpression(unary.Operand);
+                if (unary.Op == Lexer.TokenKind.KwNot)
+                    EmitTruthinessIfNeeded(unary.Operand);
                 _currentBlock.Emit(new IrUnaryOp(MapUnaryOp(unary.Op), expr.Span));
                 break;
 
@@ -1913,6 +1926,7 @@ public sealed class IrLowering
                 "sorted", "abs", "min", "max", "type", "isinstance",
                 "enumerate", "zip", "map", "filter", "open",
                 "input", "round", "chr", "ord",
+                "all", "any", "sum", "list", "dict", "set", "hash", "reversed",
             };
 
             if (builtins.Contains(ident.Name))
@@ -3175,5 +3189,20 @@ public sealed class IrLowering
         if (leftType is PrimitiveType pt)
             return pt;
         return InferExpressionType(bin.Right);
+    }
+
+    /// <summary>
+    /// Emits a truthiness conversion (IrCallBuiltin("bool", 1)) if the given expression's
+    /// resolved type is not already bool. This enables using non-bool values in boolean contexts
+    /// (if, while, and, or, not).
+    /// </summary>
+    private void EmitTruthinessIfNeeded(Expression condition)
+    {
+        if (_currentBlock is null) return;
+        var condType = _typeChecker.ResolvedTypes.TryGetValue(condition, out var ct) ? ct : null;
+        if (condType is not null && condType != PrimitiveType.Bool)
+        {
+            _currentBlock.Emit(new IrCallBuiltin("bool", 1, condition.Span));
+        }
     }
 }

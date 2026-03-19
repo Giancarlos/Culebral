@@ -112,6 +112,14 @@ public static class BuiltinSymbols
         DeclareFunction(scope, "zip", [PrimitiveType.Object, PrimitiveType.Object], PrimitiveType.Object);
         DeclareFunction(scope, "map", [PrimitiveType.Object, PrimitiveType.Object], PrimitiveType.Object);
         DeclareFunction(scope, "filter", [PrimitiveType.Object, PrimitiveType.Object], PrimitiveType.Object);
+        DeclareFunction(scope, "all", [PrimitiveType.Object], PrimitiveType.Bool);
+        DeclareFunction(scope, "any", [PrimitiveType.Object], PrimitiveType.Bool);
+        DeclareFunction(scope, "sum", [PrimitiveType.Object], PrimitiveType.Int);
+        DeclareFunction(scope, "list", [PrimitiveType.Object], PrimitiveType.Object);
+        DeclareFunction(scope, "dict", [], PrimitiveType.Object);
+        DeclareFunction(scope, "set", [PrimitiveType.Object], PrimitiveType.Object);
+        DeclareFunction(scope, "hash", [PrimitiveType.Object], PrimitiveType.Int);
+        DeclareFunction(scope, "reversed", [PrimitiveType.Object], PrimitiveType.Object);
 
         // Built-in Result type and Ok/Err constructors
         var resultType = new ClassType("Result", "Result");

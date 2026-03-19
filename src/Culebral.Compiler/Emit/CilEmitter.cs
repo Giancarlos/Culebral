@@ -1162,6 +1162,38 @@ public sealed class CilEmitter
                 break;
             }
 
+            case IrLoadElement:
+            {
+                // Stack: [collection (object), index (int)]
+                // Adjust negative index: if index < 0, index += collection.Count
+                // Then call IList.get_Item(int)
+                var idxLocal = il.DeclareLocal(typeof(int));
+                var colLocal = il.DeclareLocal(typeof(object));
+                il.Emit(OpCodes.Stloc, idxLocal);   // pop index
+                il.Emit(OpCodes.Stloc, colLocal);   // pop collection
+
+                // Negative index adjustment
+                var skipAdjust = il.DefineLabel();
+                il.Emit(OpCodes.Ldloc, idxLocal);
+                il.Emit(OpCodes.Ldc_I4_0);
+                il.Emit(OpCodes.Bge, skipAdjust);
+                // index < 0: index += collection.Count
+                il.Emit(OpCodes.Ldloc, colLocal);
+                il.Emit(OpCodes.Castclass, typeof(System.Collections.ICollection));
+                il.Emit(OpCodes.Callvirt, typeof(System.Collections.ICollection).GetProperty("Count")!.GetGetMethod()!);
+                il.Emit(OpCodes.Ldloc, idxLocal);
+                il.Emit(OpCodes.Add);
+                il.Emit(OpCodes.Stloc, idxLocal);
+                il.MarkLabel(skipAdjust);
+
+                // Call IList[index]
+                il.Emit(OpCodes.Ldloc, colLocal);
+                il.Emit(OpCodes.Castclass, typeof(System.Collections.IList));
+                il.Emit(OpCodes.Ldloc, idxLocal);
+                il.Emit(OpCodes.Callvirt, typeof(System.Collections.IList).GetMethod("get_Item", [typeof(int)])!);
+                break;
+            }
+
             default:
                 il.Emit(OpCodes.Nop);
                 break;
@@ -1227,7 +1259,19 @@ public sealed class CilEmitter
             case IrBinaryOpKind.Add: il.Emit(OpCodes.Add); break;
             case IrBinaryOpKind.Sub: il.Emit(OpCodes.Sub); break;
             case IrBinaryOpKind.Mul: il.Emit(OpCodes.Mul); break;
-            case IrBinaryOpKind.Div: il.Emit(OpCodes.Div); break;
+            case IrBinaryOpKind.Div:
+                // True division: convert int operands to double for Python-style semantics
+                if (operandType is PrimitiveType pt && pt == PrimitiveType.Int)
+                {
+                    // Stack: [left (int), right (int)] → save right, conv left, reload right, conv right
+                    var divTmp = il.DeclareLocal(typeof(int));
+                    il.Emit(OpCodes.Stloc, divTmp);   // save right
+                    il.Emit(OpCodes.Conv_R8);          // convert left to double
+                    il.Emit(OpCodes.Ldloc, divTmp);    // reload right
+                    il.Emit(OpCodes.Conv_R8);          // convert right to double
+                }
+                il.Emit(OpCodes.Div);
+                break;
             case IrBinaryOpKind.Mod: il.Emit(OpCodes.Rem); break;
             case IrBinaryOpKind.BitAnd: il.Emit(OpCodes.And); break;
             case IrBinaryOpKind.BitOr: il.Emit(OpCodes.Or); break;
@@ -1577,28 +1621,24 @@ public sealed class CilEmitter
                 }
                 else
                 {
-                    // range(start, stop, step) — not directly supported by Enumerable.Range
-                    // Emit Range(start, (stop-start)/step) as approximation for positive step
-                    var stepLocal = il.DeclareLocal(typeof(int));
-                    var stopLocal = il.DeclareLocal(typeof(int));
-                    var startLocal = il.DeclareLocal(typeof(int));
-                    il.Emit(OpCodes.Stloc, stepLocal);
-                    il.Emit(OpCodes.Stloc, stopLocal);
-                    il.Emit(OpCodes.Stloc, startLocal);
-                    il.Emit(OpCodes.Ldloc, startLocal);
-                    il.Emit(OpCodes.Ldloc, stopLocal);
-                    il.Emit(OpCodes.Ldloc, startLocal);
-                    il.Emit(OpCodes.Sub);
-                    il.Emit(OpCodes.Ldloc, stepLocal);
-                    il.Emit(OpCodes.Div);
-                    il.Emit(OpCodes.Call, enumRange);
+                    // range(start, stop, step) — custom loop supporting negative step
+                    EmitRangeWithStep(il);
                 }
                 break;
             }
 
             case "int":
-                var convertToInt = typeof(Convert).GetMethod("ToInt32", [typeof(object)])!;
-                il.Emit(OpCodes.Call, convertToInt);
+                if (argc == 2)
+                {
+                    // int(s, base) → Convert.ToInt32(string, int)
+                    var convertWithBase = typeof(Convert).GetMethod("ToInt32", [typeof(string), typeof(int)])!;
+                    il.Emit(OpCodes.Call, convertWithBase);
+                }
+                else
+                {
+                    var convertToInt = typeof(Convert).GetMethod("ToInt32", [typeof(object)])!;
+                    il.Emit(OpCodes.Call, convertToInt);
+                }
                 break;
 
             case "float":
@@ -1627,28 +1667,44 @@ public sealed class CilEmitter
 
             case "min":
             {
-                var minArgType = InferStackTopType(callBuiltin, func);
-                if (minArgType == typeof(double))
+                if (argc == 1)
                 {
-                    il.Emit(OpCodes.Call, typeof(Math).GetMethod("Min", [typeof(double), typeof(double)])!);
+                    // min(iterable) → iterate and find minimum using Comparer<object>.Default
+                    EmitIterableMinMax(il, isMin: true);
                 }
                 else
                 {
-                    il.Emit(OpCodes.Call, typeof(Math).GetMethod("Min", [typeof(int), typeof(int)])!);
+                    var minArgType = InferStackTopType(callBuiltin, func);
+                    if (minArgType == typeof(double))
+                    {
+                        il.Emit(OpCodes.Call, typeof(Math).GetMethod("Min", [typeof(double), typeof(double)])!);
+                    }
+                    else
+                    {
+                        il.Emit(OpCodes.Call, typeof(Math).GetMethod("Min", [typeof(int), typeof(int)])!);
+                    }
                 }
                 break;
             }
 
             case "max":
             {
-                var maxArgType = InferStackTopType(callBuiltin, func);
-                if (maxArgType == typeof(double))
+                if (argc == 1)
                 {
-                    il.Emit(OpCodes.Call, typeof(Math).GetMethod("Max", [typeof(double), typeof(double)])!);
+                    // max(iterable) → iterate and find maximum using Comparer<object>.Default
+                    EmitIterableMinMax(il, isMin: false);
                 }
                 else
                 {
-                    il.Emit(OpCodes.Call, typeof(Math).GetMethod("Max", [typeof(int), typeof(int)])!);
+                    var maxArgType = InferStackTopType(callBuiltin, func);
+                    if (maxArgType == typeof(double))
+                    {
+                        il.Emit(OpCodes.Call, typeof(Math).GetMethod("Max", [typeof(double), typeof(double)])!);
+                    }
+                    else
+                    {
+                        il.Emit(OpCodes.Call, typeof(Math).GetMethod("Max", [typeof(int), typeof(int)])!);
+                    }
                 }
                 break;
             }
@@ -1663,9 +1719,17 @@ public sealed class CilEmitter
 
             case "round":
             {
-                // round(x) → (int)Math.Round(x)
-                il.Emit(OpCodes.Call, typeof(Math).GetMethod("Round", [typeof(double)])!);
-                il.Emit(OpCodes.Conv_I4);
+                if (argc == 2)
+                {
+                    // round(x, ndigits) → Math.Round(double, int) → returns double
+                    il.Emit(OpCodes.Call, typeof(Math).GetMethod("Round", [typeof(double), typeof(int)])!);
+                }
+                else
+                {
+                    // round(x) → (int)Math.Round(x)
+                    il.Emit(OpCodes.Call, typeof(Math).GetMethod("Round", [typeof(double)])!);
+                    il.Emit(OpCodes.Conv_I4);
+                }
                 break;
             }
 
@@ -1697,6 +1761,166 @@ public sealed class CilEmitter
                     il.Emit(OpCodes.Box, typeArgType);
                 il.Emit(OpCodes.Callvirt, typeof(object).GetMethod("GetType")!);
                 il.Emit(OpCodes.Callvirt, typeof(Type).GetProperty("Name")!.GetGetMethod()!);
+                break;
+            }
+
+            case "bool":
+            {
+                // bool(x) — truthiness conversion
+                var boolArgType = InferStackTopType(callBuiltin, func);
+                if (boolArgType == typeof(bool))
+                {
+                    // already a bool, nothing to do
+                }
+                else if (boolArgType == typeof(int))
+                {
+                    // int != 0
+                    il.Emit(OpCodes.Ldc_I4_0);
+                    il.Emit(OpCodes.Cgt_Un); // pushes 1 if nonzero, 0 if zero
+                }
+                else if (boolArgType == typeof(string))
+                {
+                    // !string.IsNullOrEmpty(s)
+                    il.Emit(OpCodes.Call, typeof(string).GetMethod("IsNullOrEmpty", [typeof(string)])!);
+                    il.Emit(OpCodes.Ldc_I4_0);
+                    il.Emit(OpCodes.Ceq); // negate
+                }
+                else
+                {
+                    // For reference types: null → false, ICollection with Count==0 → false, else → true
+                    if (boolArgType.IsValueType)
+                        il.Emit(OpCodes.Box, boolArgType);
+                    EmitObjectTruthiness(il);
+                }
+                break;
+            }
+
+            case "sorted":
+            {
+                // sorted(iterable) → new List<object>(IEnumerable), .Sort(), return list
+                EmitSortedHelper(il);
+                break;
+            }
+
+            case "reversed":
+            {
+                // reversed(iterable) → new List<object>(IEnumerable), .Reverse(), return list
+                EmitReversedHelper(il);
+                break;
+            }
+
+            case "enumerate":
+            {
+                // enumerate(iterable) → list of (int, object) tuples via helper
+                EmitEnumerateHelper(il);
+                break;
+            }
+
+            case "zip":
+            {
+                // zip(a, b) → list of (object, object) tuples via helper
+                EmitZipHelper(il);
+                break;
+            }
+
+            case "map":
+            {
+                // map(fn, iterable) → list of fn(x) for x in iterable via helper
+                EmitMapHelper(il);
+                break;
+            }
+
+            case "filter":
+            {
+                // filter(fn, iterable) → list of x for x in iterable if fn(x) via helper
+                EmitFilterHelper(il);
+                break;
+            }
+
+            case "isinstance":
+            {
+                // isinstance(x, T) — runtime type check
+                // Stack: [x, typeName]. We need both as object for the helper.
+                // Save typeName, box x if needed, then push typeName back.
+                var typeNameTmp = il.DeclareLocal(typeof(object));
+                il.Emit(OpCodes.Stloc, typeNameTmp); // pop typeName
+                // Now x is on top. Find the type of the first arg (instruction i-2).
+                var isinstArgType = InferNthArgType(callBuiltin, func, 0, 2);
+                if (isinstArgType.IsValueType)
+                    il.Emit(OpCodes.Box, isinstArgType);
+                il.Emit(OpCodes.Ldloc, typeNameTmp); // push typeName back
+                EmitIsinstanceHelper(il);
+                break;
+            }
+
+            case "all":
+            {
+                // all(iterable) → true if all elements are truthy
+                EmitAllHelper(il);
+                break;
+            }
+
+            case "any":
+            {
+                // any(iterable) → true if any element is truthy
+                EmitAnyHelper(il);
+                break;
+            }
+
+            case "sum":
+            {
+                // sum(iterable) → sum of all elements
+                EmitSumHelper(il);
+                break;
+            }
+
+            case "list":
+            {
+                // list(iterable) → new List<object>(IEnumerable)
+                if (argc == 0)
+                {
+                    il.Emit(OpCodes.Newobj, typeof(List<object>).GetConstructor(Type.EmptyTypes)!);
+                }
+                else
+                {
+                    il.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+                    // Use the helper: iterate and add to new list
+                    EmitListFromEnumerableHelper(il);
+                }
+                break;
+            }
+
+            case "dict":
+            {
+                // dict() → new Dictionary<object, object>()
+                // Pop any args if passed (shouldn't be for now)
+                for (int i = 0; i < argc; i++)
+                    il.Emit(OpCodes.Pop);
+                il.Emit(OpCodes.Newobj, typeof(Dictionary<object, object>).GetConstructor(Type.EmptyTypes)!);
+                break;
+            }
+
+            case "set":
+            {
+                // set(iterable) → new HashSet<object> from iterable
+                if (argc == 0)
+                {
+                    il.Emit(OpCodes.Newobj, typeof(HashSet<object>).GetConstructor(Type.EmptyTypes)!);
+                }
+                else
+                {
+                    EmitSetFromEnumerableHelper(il);
+                }
+                break;
+            }
+
+            case "hash":
+            {
+                // hash(x) → x.GetHashCode()
+                var hashArgType = InferStackTopType(callBuiltin, func);
+                if (hashArgType.IsValueType)
+                    il.Emit(OpCodes.Box, hashArgType);
+                il.Emit(OpCodes.Callvirt, typeof(object).GetMethod("GetHashCode")!);
                 break;
             }
 
@@ -2027,6 +2251,976 @@ public sealed class CilEmitter
         }
     }
 
+    /// <summary>
+    /// Emits truthiness check for an object on the stack.
+    /// null -> false, ICollection with Count==0 -> false, else -> true.
+    /// </summary>
+    private void EmitObjectTruthiness(ILGenerator il)
+    {
+        var helperName = "<CulebralTruthiness>";
+        if (!_methodBuilders.TryGetValue(helperName, out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod(helperName,
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(bool),
+                    [typeof(object)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "value");
+                _methodBuilders[helperName] = helper;
+
+                var hil = helper.GetILGenerator();
+                var checkCollection = hil.DefineLabel();
+                var returnTrue = hil.DefineLabel();
+
+                // if (value == null) return false
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Brtrue, checkCollection);
+                hil.Emit(OpCodes.Ldc_I4_0);
+                hil.Emit(OpCodes.Ret);
+
+                // if (value is ICollection c) return c.Count > 0
+                hil.MarkLabel(checkCollection);
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Isinst, typeof(System.Collections.ICollection));
+                hil.Emit(OpCodes.Dup);
+                hil.Emit(OpCodes.Brfalse, returnTrue);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.ICollection).GetProperty("Count")!.GetGetMethod()!);
+                hil.Emit(OpCodes.Ldc_I4_0);
+                hil.Emit(OpCodes.Cgt);
+                hil.Emit(OpCodes.Ret);
+
+                // Not a collection and not null -> truthy
+                hil.MarkLabel(returnTrue);
+                hil.Emit(OpCodes.Pop); // pop the null isinst result
+                hil.Emit(OpCodes.Ldc_I4_1);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>
+    /// Emits min(iterable) or max(iterable) via a generated helper method.
+    /// Iterates the collection using IEnumerable and tracks min/max via Comparer&lt;object&gt;.Default.
+    /// </summary>
+    private void EmitIterableMinMax(ILGenerator il, bool isMin)
+    {
+        var helperName = isMin ? "<CulebralIterMin>" : "<CulebralIterMax>";
+        if (!_methodBuilders.TryGetValue(helperName, out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod(helperName,
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(object),
+                    [typeof(object)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "source");
+                _methodBuilders[helperName] = helper;
+
+                var hil = helper.GetILGenerator();
+                var bestLocal = hil.DeclareLocal(typeof(object));
+                var currentLocal = hil.DeclareLocal(typeof(object));
+                var enumeratorLocal = hil.DeclareLocal(typeof(System.Collections.IEnumerator));
+                var firstLocal = hil.DeclareLocal(typeof(bool));
+
+                hil.Emit(OpCodes.Ldc_I4_1);
+                hil.Emit(OpCodes.Stloc, firstLocal);
+                hil.Emit(OpCodes.Ldnull);
+                hil.Emit(OpCodes.Stloc, bestLocal);
+
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!);
+                hil.Emit(OpCodes.Stloc, enumeratorLocal);
+
+                var loopStart = hil.DefineLabel();
+                var loopEnd = hil.DefineLabel();
+                var skipUpdate = hil.DefineLabel();
+
+                hil.MarkLabel(loopStart);
+                hil.Emit(OpCodes.Ldloc, enumeratorLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
+                hil.Emit(OpCodes.Brfalse, loopEnd);
+
+                hil.Emit(OpCodes.Ldloc, enumeratorLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
+                hil.Emit(OpCodes.Stloc, currentLocal);
+
+                hil.Emit(OpCodes.Ldloc, firstLocal);
+                var notFirst = hil.DefineLabel();
+                hil.Emit(OpCodes.Brfalse, notFirst);
+                hil.Emit(OpCodes.Ldloc, currentLocal);
+                hil.Emit(OpCodes.Stloc, bestLocal);
+                hil.Emit(OpCodes.Ldc_I4_0);
+                hil.Emit(OpCodes.Stloc, firstLocal);
+                hil.Emit(OpCodes.Br, loopStart);
+
+                hil.MarkLabel(notFirst);
+                var comparerProp = typeof(Comparer<object>).GetProperty("Default")!.GetGetMethod()!;
+                var compareMethod = typeof(Comparer<object>).GetMethod("Compare", [typeof(object), typeof(object)])!;
+                hil.Emit(OpCodes.Call, comparerProp);
+                hil.Emit(OpCodes.Ldloc, currentLocal);
+                hil.Emit(OpCodes.Ldloc, bestLocal);
+                hil.Emit(OpCodes.Callvirt, compareMethod);
+                hil.Emit(OpCodes.Ldc_I4_0);
+                hil.Emit(isMin ? OpCodes.Bge : OpCodes.Ble, skipUpdate);
+                hil.Emit(OpCodes.Ldloc, currentLocal);
+                hil.Emit(OpCodes.Stloc, bestLocal);
+                hil.MarkLabel(skipUpdate);
+                hil.Emit(OpCodes.Br, loopStart);
+
+                hil.MarkLabel(loopEnd);
+                hil.Emit(OpCodes.Ldloc, bestLocal);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>
+    /// Emits range(start, stop, step) as a List&lt;object&gt; supporting negative step values.
+    /// Stack has: [start (int), stop (int), step (int)]
+    /// </summary>
+    private void EmitRangeWithStep(ILGenerator il)
+    {
+        var helperName = "<CulebralRangeStep>";
+        if (!_methodBuilders.TryGetValue(helperName, out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod(helperName,
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(List<object>),
+                    [typeof(int), typeof(int), typeof(int)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "start");
+                helper.DefineParameter(2, ParameterAttributes.None, "stop");
+                helper.DefineParameter(3, ParameterAttributes.None, "step");
+                _methodBuilders[helperName] = helper;
+
+                var hil = helper.GetILGenerator();
+                var listLocal = hil.DeclareLocal(typeof(List<object>));
+                var iLocal = hil.DeclareLocal(typeof(int));
+
+                var stepOk = hil.DefineLabel();
+                hil.Emit(OpCodes.Ldarg_2);
+                hil.Emit(OpCodes.Ldc_I4_0);
+                hil.Emit(OpCodes.Bne_Un, stepOk);
+                hil.Emit(OpCodes.Ldstr, "range() arg 3 must not be zero");
+                hil.Emit(OpCodes.Newobj, typeof(ArgumentException).GetConstructor([typeof(string)])!);
+                hil.Emit(OpCodes.Throw);
+                hil.MarkLabel(stepOk);
+
+                hil.Emit(OpCodes.Newobj, typeof(List<object>).GetConstructor(Type.EmptyTypes)!);
+                hil.Emit(OpCodes.Stloc, listLocal);
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Stloc, iLocal);
+
+                var loopStart = hil.DefineLabel();
+                var loopEnd = hil.DefineLabel();
+                var positiveCheck = hil.DefineLabel();
+                var doBody = hil.DefineLabel();
+
+                hil.MarkLabel(loopStart);
+                hil.Emit(OpCodes.Ldarg_2);
+                hil.Emit(OpCodes.Ldc_I4_0);
+                hil.Emit(OpCodes.Bgt, positiveCheck);
+
+                hil.Emit(OpCodes.Ldloc, iLocal);
+                hil.Emit(OpCodes.Ldarg_1);
+                hil.Emit(OpCodes.Bgt, doBody);
+                hil.Emit(OpCodes.Br, loopEnd);
+
+                hil.MarkLabel(positiveCheck);
+                hil.Emit(OpCodes.Ldloc, iLocal);
+                hil.Emit(OpCodes.Ldarg_1);
+                hil.Emit(OpCodes.Blt, doBody);
+                hil.Emit(OpCodes.Br, loopEnd);
+
+                hil.MarkLabel(doBody);
+                hil.Emit(OpCodes.Ldloc, listLocal);
+                hil.Emit(OpCodes.Ldloc, iLocal);
+                hil.Emit(OpCodes.Box, typeof(int));
+                hil.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("Add")!);
+                hil.Emit(OpCodes.Ldloc, iLocal);
+                hil.Emit(OpCodes.Ldarg_2);
+                hil.Emit(OpCodes.Add);
+                hil.Emit(OpCodes.Stloc, iLocal);
+                hil.Emit(OpCodes.Br, loopStart);
+
+                hil.MarkLabel(loopEnd);
+                hil.Emit(OpCodes.Ldloc, listLocal);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>Emits sorted(iterable) via a generated helper method.</summary>
+    private void EmitSortedHelper(ILGenerator il)
+    {
+        if (!_methodBuilders.TryGetValue("<CulebralSorted>", out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod("<CulebralSorted>",
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(List<object>),
+                    [typeof(object)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "source");
+                _methodBuilders["<CulebralSorted>"] = helper;
+
+                var hil = helper.GetILGenerator();
+                // var list = new List<object>()
+                var listLocal = hil.DeclareLocal(typeof(List<object>));
+                hil.Emit(OpCodes.Newobj, typeof(List<object>).GetConstructor(Type.EmptyTypes)!);
+                hil.Emit(OpCodes.Stloc, listLocal);
+
+                // iterate source as IEnumerable, add each to list
+                EmitIterateAndCollect(hil, listLocal, argIndex: 0);
+
+                // list.Sort()
+                hil.Emit(OpCodes.Ldloc, listLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("Sort", Type.EmptyTypes)!);
+
+                hil.Emit(OpCodes.Ldloc, listLocal);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>Emits reversed(iterable) via a generated helper method.</summary>
+    private void EmitReversedHelper(ILGenerator il)
+    {
+        if (!_methodBuilders.TryGetValue("<CulebralReversed>", out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod("<CulebralReversed>",
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(List<object>),
+                    [typeof(object)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "source");
+                _methodBuilders["<CulebralReversed>"] = helper;
+
+                var hil = helper.GetILGenerator();
+                var listLocal = hil.DeclareLocal(typeof(List<object>));
+                hil.Emit(OpCodes.Newobj, typeof(List<object>).GetConstructor(Type.EmptyTypes)!);
+                hil.Emit(OpCodes.Stloc, listLocal);
+
+                EmitIterateAndCollect(hil, listLocal, argIndex: 0);
+
+                hil.Emit(OpCodes.Ldloc, listLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("Reverse", Type.EmptyTypes)!);
+
+                hil.Emit(OpCodes.Ldloc, listLocal);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>Emits enumerate(iterable) via a generated helper method.</summary>
+    private void EmitEnumerateHelper(ILGenerator il)
+    {
+        if (!_methodBuilders.TryGetValue("<CulebralEnumerate>", out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod("<CulebralEnumerate>",
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(List<object>),
+                    [typeof(object)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "source");
+                _methodBuilders["<CulebralEnumerate>"] = helper;
+
+                var hil = helper.GetILGenerator();
+                // result = new List<object>()
+                var resultLocal = hil.DeclareLocal(typeof(List<object>));
+                hil.Emit(OpCodes.Newobj, typeof(List<object>).GetConstructor(Type.EmptyTypes)!);
+                hil.Emit(OpCodes.Stloc, resultLocal);
+
+                // index = 0
+                var indexLocal = hil.DeclareLocal(typeof(int));
+                hil.Emit(OpCodes.Ldc_I4_0);
+                hil.Emit(OpCodes.Stloc, indexLocal);
+
+                // enumerator = ((IEnumerable)source).GetEnumerator()
+                var enumLocal = hil.DeclareLocal(typeof(System.Collections.IEnumerator));
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!);
+                hil.Emit(OpCodes.Stloc, enumLocal);
+
+                var loopStart = hil.DefineLabel();
+                var loopEnd = hil.DefineLabel();
+
+                hil.MarkLabel(loopStart);
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
+                hil.Emit(OpCodes.Brfalse, loopEnd);
+
+                // Create ValueTuple<object, object>(box(index), current) and box it
+                hil.Emit(OpCodes.Ldloc, resultLocal);
+                hil.Emit(OpCodes.Ldloc, indexLocal);
+                hil.Emit(OpCodes.Box, typeof(int));
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
+                var vtCtor = typeof(ValueTuple<object, object>).GetConstructor([typeof(object), typeof(object)])!;
+                hil.Emit(OpCodes.Newobj, vtCtor);
+                hil.Emit(OpCodes.Box, typeof(ValueTuple<object, object>));
+                hil.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("Add")!);
+
+                // index++
+                hil.Emit(OpCodes.Ldloc, indexLocal);
+                hil.Emit(OpCodes.Ldc_I4_1);
+                hil.Emit(OpCodes.Add);
+                hil.Emit(OpCodes.Stloc, indexLocal);
+
+                hil.Emit(OpCodes.Br, loopStart);
+                hil.MarkLabel(loopEnd);
+
+                hil.Emit(OpCodes.Ldloc, resultLocal);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>Emits zip(a, b) via a generated helper method.</summary>
+    private void EmitZipHelper(ILGenerator il)
+    {
+        if (!_methodBuilders.TryGetValue("<CulebralZip>", out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod("<CulebralZip>",
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(List<object>),
+                    [typeof(object), typeof(object)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "a");
+                helper.DefineParameter(2, ParameterAttributes.None, "b");
+                _methodBuilders["<CulebralZip>"] = helper;
+
+                var hil = helper.GetILGenerator();
+                var resultLocal = hil.DeclareLocal(typeof(List<object>));
+                hil.Emit(OpCodes.Newobj, typeof(List<object>).GetConstructor(Type.EmptyTypes)!);
+                hil.Emit(OpCodes.Stloc, resultLocal);
+
+                // enumA = ((IEnumerable)a).GetEnumerator()
+                var enumA = hil.DeclareLocal(typeof(System.Collections.IEnumerator));
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!);
+                hil.Emit(OpCodes.Stloc, enumA);
+
+                var enumB = hil.DeclareLocal(typeof(System.Collections.IEnumerator));
+                hil.Emit(OpCodes.Ldarg_1);
+                hil.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!);
+                hil.Emit(OpCodes.Stloc, enumB);
+
+                var loopStart = hil.DefineLabel();
+                var loopEnd = hil.DefineLabel();
+
+                hil.MarkLabel(loopStart);
+                // if !enumA.MoveNext() → end
+                hil.Emit(OpCodes.Ldloc, enumA);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
+                hil.Emit(OpCodes.Brfalse, loopEnd);
+                // if !enumB.MoveNext() → end
+                hil.Emit(OpCodes.Ldloc, enumB);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
+                hil.Emit(OpCodes.Brfalse, loopEnd);
+
+                // result.Add(box(ValueTuple<object,object>(a.Current, b.Current)))
+                hil.Emit(OpCodes.Ldloc, resultLocal);
+                hil.Emit(OpCodes.Ldloc, enumA);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
+                hil.Emit(OpCodes.Ldloc, enumB);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
+                var vtCtor = typeof(ValueTuple<object, object>).GetConstructor([typeof(object), typeof(object)])!;
+                hil.Emit(OpCodes.Newobj, vtCtor);
+                hil.Emit(OpCodes.Box, typeof(ValueTuple<object, object>));
+                hil.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("Add")!);
+
+                hil.Emit(OpCodes.Br, loopStart);
+                hil.MarkLabel(loopEnd);
+
+                hil.Emit(OpCodes.Ldloc, resultLocal);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>Emits map(fn, iterable) via a generated helper method.</summary>
+    private void EmitMapHelper(ILGenerator il)
+    {
+        if (!_methodBuilders.TryGetValue("<CulebralMap>", out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod("<CulebralMap>",
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(List<object>),
+                    [typeof(object), typeof(object)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "fn");
+                helper.DefineParameter(2, ParameterAttributes.None, "source");
+                _methodBuilders["<CulebralMap>"] = helper;
+
+                var hil = helper.GetILGenerator();
+                var resultLocal = hil.DeclareLocal(typeof(List<object>));
+                hil.Emit(OpCodes.Newobj, typeof(List<object>).GetConstructor(Type.EmptyTypes)!);
+                hil.Emit(OpCodes.Stloc, resultLocal);
+
+                var delegateLocal = hil.DeclareLocal(typeof(Delegate));
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Castclass, typeof(Delegate));
+                hil.Emit(OpCodes.Stloc, delegateLocal);
+
+                var enumLocal = hil.DeclareLocal(typeof(System.Collections.IEnumerator));
+                hil.Emit(OpCodes.Ldarg_1);
+                hil.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!);
+                hil.Emit(OpCodes.Stloc, enumLocal);
+
+                var currentLocal = hil.DeclareLocal(typeof(object));
+                var argsLocal = hil.DeclareLocal(typeof(object[]));
+
+                var loopStart = hil.DefineLabel();
+                var loopEnd = hil.DefineLabel();
+
+                hil.MarkLabel(loopStart);
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
+                hil.Emit(OpCodes.Brfalse, loopEnd);
+
+                // current = enumerator.Current
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
+                hil.Emit(OpCodes.Stloc, currentLocal);
+
+                // args = new object[] { current }
+                hil.Emit(OpCodes.Ldc_I4_1);
+                hil.Emit(OpCodes.Newarr, typeof(object));
+                hil.Emit(OpCodes.Stloc, argsLocal);
+                hil.Emit(OpCodes.Ldloc, argsLocal);
+                hil.Emit(OpCodes.Ldc_I4_0);
+                hil.Emit(OpCodes.Ldloc, currentLocal);
+                hil.Emit(OpCodes.Stelem_Ref);
+
+                // result.Add(delegate.DynamicInvoke(args))
+                hil.Emit(OpCodes.Ldloc, resultLocal);
+                hil.Emit(OpCodes.Ldloc, delegateLocal);
+                hil.Emit(OpCodes.Ldloc, argsLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(Delegate).GetMethod("DynamicInvoke", [typeof(object[])])!);
+                hil.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("Add")!);
+
+                hil.Emit(OpCodes.Br, loopStart);
+                hil.MarkLabel(loopEnd);
+
+                hil.Emit(OpCodes.Ldloc, resultLocal);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>Emits filter(fn, iterable) via a generated helper method.</summary>
+    private void EmitFilterHelper(ILGenerator il)
+    {
+        if (!_methodBuilders.TryGetValue("<CulebralFilter>", out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod("<CulebralFilter>",
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(List<object>),
+                    [typeof(object), typeof(object)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "fn");
+                helper.DefineParameter(2, ParameterAttributes.None, "source");
+                _methodBuilders["<CulebralFilter>"] = helper;
+
+                var hil = helper.GetILGenerator();
+                var resultLocal = hil.DeclareLocal(typeof(List<object>));
+                hil.Emit(OpCodes.Newobj, typeof(List<object>).GetConstructor(Type.EmptyTypes)!);
+                hil.Emit(OpCodes.Stloc, resultLocal);
+
+                var enumLocal = hil.DeclareLocal(typeof(System.Collections.IEnumerator));
+                hil.Emit(OpCodes.Ldarg_1);
+                hil.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!);
+                hil.Emit(OpCodes.Stloc, enumLocal);
+
+                var delegateLocal = hil.DeclareLocal(typeof(Delegate));
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Castclass, typeof(Delegate));
+                hil.Emit(OpCodes.Stloc, delegateLocal);
+
+                var currentLocal = hil.DeclareLocal(typeof(object));
+                var argsLocal = hil.DeclareLocal(typeof(object[]));
+
+                var loopStart = hil.DefineLabel();
+                var loopEnd = hil.DefineLabel();
+                var skipAdd = hil.DefineLabel();
+
+                hil.MarkLabel(loopStart);
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
+                hil.Emit(OpCodes.Brfalse, loopEnd);
+
+                // current = enumerator.Current
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
+                hil.Emit(OpCodes.Stloc, currentLocal);
+
+                // args = new object[] { current }
+                hil.Emit(OpCodes.Ldc_I4_1);
+                hil.Emit(OpCodes.Newarr, typeof(object));
+                hil.Emit(OpCodes.Stloc, argsLocal);
+                hil.Emit(OpCodes.Ldloc, argsLocal);
+                hil.Emit(OpCodes.Ldc_I4_0);
+                hil.Emit(OpCodes.Ldloc, currentLocal);
+                hil.Emit(OpCodes.Stelem_Ref);
+
+                // result = fn.DynamicInvoke(args)
+                hil.Emit(OpCodes.Ldloc, delegateLocal);
+                hil.Emit(OpCodes.Ldloc, argsLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(Delegate).GetMethod("DynamicInvoke", [typeof(object[])])!);
+
+                // Check truthiness: if result is bool, unbox; otherwise check non-null
+                hil.Emit(OpCodes.Unbox_Any, typeof(bool));
+                hil.Emit(OpCodes.Brfalse, skipAdd);
+
+                // Add current to result
+                hil.Emit(OpCodes.Ldloc, resultLocal);
+                hil.Emit(OpCodes.Ldloc, currentLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("Add")!);
+
+                hil.MarkLabel(skipAdd);
+                hil.Emit(OpCodes.Br, loopStart);
+                hil.MarkLabel(loopEnd);
+
+                hil.Emit(OpCodes.Ldloc, resultLocal);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>Emits isinstance(x, T) via a generated helper method.</summary>
+    private void EmitIsinstanceHelper(ILGenerator il)
+    {
+        if (!_methodBuilders.TryGetValue("<CulebralIsinstance>", out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod("<CulebralIsinstance>",
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(bool),
+                    [typeof(object), typeof(object)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "x");
+                helper.DefineParameter(2, ParameterAttributes.None, "typeName");
+                _methodBuilders["<CulebralIsinstance>"] = helper;
+
+                var hil = helper.GetILGenerator();
+                // Get the type name string from arg1 (could be a string like "int", or a Type)
+                // We'll compare x.GetType().Name against known type names
+                // arg0 = x (object), arg1 = type name (object — typically a string)
+
+                var xTypeLocal = hil.DeclareLocal(typeof(string)); // x's type name
+                var typeNameLocal = hil.DeclareLocal(typeof(string)); // target type name
+
+                // Get x's type name
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Callvirt, typeof(object).GetMethod("GetType")!);
+                hil.Emit(OpCodes.Callvirt, typeof(Type).GetProperty("Name")!.GetGetMethod()!);
+                hil.Emit(OpCodes.Stloc, xTypeLocal);
+
+                // Get target type name as string
+                hil.Emit(OpCodes.Ldarg_1);
+                hil.Emit(OpCodes.Callvirt, typeof(object).GetMethod("ToString")!);
+                hil.Emit(OpCodes.Stloc, typeNameLocal);
+
+                // Map Culebral type names to .NET type names and compare
+                // We'll do a series of checks: "int" → "Int32", "str" → "String", etc.
+                var returnTrue = hil.DefineLabel();
+                var returnFalse = hil.DefineLabel();
+
+                // Direct match: x.GetType().Name == typeName.ToString()
+                hil.Emit(OpCodes.Ldloc, xTypeLocal);
+                hil.Emit(OpCodes.Ldloc, typeNameLocal);
+                hil.Emit(OpCodes.Call, typeof(string).GetMethod("op_Equality", [typeof(string), typeof(string)])!);
+                hil.Emit(OpCodes.Brtrue, returnTrue);
+
+                // Map "int" → "Int32"
+                EmitTypeNameCheck(hil, xTypeLocal, typeNameLocal, "int", "Int32", returnTrue);
+                EmitTypeNameCheck(hil, xTypeLocal, typeNameLocal, "str", "String", returnTrue);
+                EmitTypeNameCheck(hil, xTypeLocal, typeNameLocal, "float", "Double", returnTrue);
+                EmitTypeNameCheck(hil, xTypeLocal, typeNameLocal, "bool", "Boolean", returnTrue);
+                EmitTypeNameCheck(hil, xTypeLocal, typeNameLocal, "list", "List`1", returnTrue);
+                EmitTypeNameCheck(hil, xTypeLocal, typeNameLocal, "dict", "Dictionary`2", returnTrue);
+                EmitTypeNameCheck(hil, xTypeLocal, typeNameLocal, "set", "HashSet`1", returnTrue);
+
+                hil.MarkLabel(returnFalse);
+                hil.Emit(OpCodes.Ldc_I4_0);
+                hil.Emit(OpCodes.Ret);
+
+                hil.MarkLabel(returnTrue);
+                hil.Emit(OpCodes.Ldc_I4_1);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    private static void EmitTypeNameCheck(ILGenerator il, LocalBuilder xTypeName, LocalBuilder targetName,
+        string culebralName, string dotnetName, Label returnTrue)
+    {
+        var skip = il.DefineLabel();
+        // if targetName == culebralName && xTypeName == dotnetName → true
+        il.Emit(OpCodes.Ldloc, targetName);
+        il.Emit(OpCodes.Ldstr, culebralName);
+        il.Emit(OpCodes.Call, typeof(string).GetMethod("op_Equality", [typeof(string), typeof(string)])!);
+        il.Emit(OpCodes.Brfalse, skip);
+        il.Emit(OpCodes.Ldloc, xTypeName);
+        il.Emit(OpCodes.Ldstr, dotnetName);
+        il.Emit(OpCodes.Call, typeof(string).GetMethod("op_Equality", [typeof(string), typeof(string)])!);
+        il.Emit(OpCodes.Brtrue, returnTrue);
+        il.MarkLabel(skip);
+    }
+
+    /// <summary>Emits all(iterable) via a generated helper method.</summary>
+    private void EmitAllHelper(ILGenerator il)
+    {
+        if (!_methodBuilders.TryGetValue("<CulebralAll>", out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod("<CulebralAll>",
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(bool),
+                    [typeof(object)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "source");
+                _methodBuilders["<CulebralAll>"] = helper;
+
+                var hil = helper.GetILGenerator();
+                var enumLocal = hil.DeclareLocal(typeof(System.Collections.IEnumerator));
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!);
+                hil.Emit(OpCodes.Stloc, enumLocal);
+
+                var loopStart = hil.DefineLabel();
+                var returnFalse = hil.DefineLabel();
+                var loopEnd = hil.DefineLabel();
+
+                hil.MarkLabel(loopStart);
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
+                hil.Emit(OpCodes.Brfalse, loopEnd);
+
+                // Check truthiness of current element
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
+                EmitTruthinessCheck(hil, returnFalse);
+
+                hil.Emit(OpCodes.Br, loopStart);
+
+                hil.MarkLabel(returnFalse);
+                hil.Emit(OpCodes.Ldc_I4_0);
+                hil.Emit(OpCodes.Ret);
+
+                hil.MarkLabel(loopEnd);
+                hil.Emit(OpCodes.Ldc_I4_1);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>Emits any(iterable) via a generated helper method.</summary>
+    private void EmitAnyHelper(ILGenerator il)
+    {
+        if (!_methodBuilders.TryGetValue("<CulebralAny>", out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod("<CulebralAny>",
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(bool),
+                    [typeof(object)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "source");
+                _methodBuilders["<CulebralAny>"] = helper;
+
+                var hil = helper.GetILGenerator();
+                var enumLocal = hil.DeclareLocal(typeof(System.Collections.IEnumerator));
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!);
+                hil.Emit(OpCodes.Stloc, enumLocal);
+
+                var loopStart = hil.DefineLabel();
+                var returnTrue = hil.DefineLabel();
+                var loopEnd = hil.DefineLabel();
+                var notTruthy = hil.DefineLabel();
+
+                hil.MarkLabel(loopStart);
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
+                hil.Emit(OpCodes.Brfalse, loopEnd);
+
+                // Check truthiness of current element — if truthy, return true
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
+                // For any(): branch to notTruthy if falsy, else return true
+                EmitTruthinessCheck(hil, notTruthy);
+                hil.Emit(OpCodes.Br, returnTrue);
+
+                hil.MarkLabel(notTruthy);
+                hil.Emit(OpCodes.Br, loopStart);
+
+                hil.MarkLabel(returnTrue);
+                hil.Emit(OpCodes.Ldc_I4_1);
+                hil.Emit(OpCodes.Ret);
+
+                hil.MarkLabel(loopEnd);
+                hil.Emit(OpCodes.Ldc_I4_0);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>Emits sum(iterable) via a generated helper method.</summary>
+    private void EmitSumHelper(ILGenerator il)
+    {
+        if (!_methodBuilders.TryGetValue("<CulebralSum>", out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod("<CulebralSum>",
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(int),
+                    [typeof(object)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "source");
+                _methodBuilders["<CulebralSum>"] = helper;
+
+                var hil = helper.GetILGenerator();
+                // accumulator = 0
+                var accLocal = hil.DeclareLocal(typeof(int));
+                hil.Emit(OpCodes.Ldc_I4_0);
+                hil.Emit(OpCodes.Stloc, accLocal);
+
+                var enumLocal = hil.DeclareLocal(typeof(System.Collections.IEnumerator));
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!);
+                hil.Emit(OpCodes.Stloc, enumLocal);
+
+                var loopStart = hil.DefineLabel();
+                var loopEnd = hil.DefineLabel();
+
+                hil.MarkLabel(loopStart);
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
+                hil.Emit(OpCodes.Brfalse, loopEnd);
+
+                // acc += Convert.ToInt32(current)
+                hil.Emit(OpCodes.Ldloc, accLocal);
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
+                hil.Emit(OpCodes.Call, typeof(Convert).GetMethod("ToInt32", [typeof(object)])!);
+                hil.Emit(OpCodes.Add);
+                hil.Emit(OpCodes.Stloc, accLocal);
+
+                hil.Emit(OpCodes.Br, loopStart);
+                hil.MarkLabel(loopEnd);
+
+                hil.Emit(OpCodes.Ldloc, accLocal);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>Emits list(iterable) — creates a new List&lt;object&gt; from an IEnumerable.</summary>
+    private void EmitListFromEnumerableHelper(ILGenerator il)
+    {
+        if (!_methodBuilders.TryGetValue("<CulebralList>", out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod("<CulebralList>",
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(List<object>),
+                    [typeof(System.Collections.IEnumerable)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "source");
+                _methodBuilders["<CulebralList>"] = helper;
+
+                var hil = helper.GetILGenerator();
+                var resultLocal = hil.DeclareLocal(typeof(List<object>));
+                hil.Emit(OpCodes.Newobj, typeof(List<object>).GetConstructor(Type.EmptyTypes)!);
+                hil.Emit(OpCodes.Stloc, resultLocal);
+
+                EmitIterateAndCollect(hil, resultLocal, argIndex: 0, sourceIsIEnumerable: true);
+
+                hil.Emit(OpCodes.Ldloc, resultLocal);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>Emits set(iterable) — creates a new HashSet&lt;object&gt; from an IEnumerable.</summary>
+    private void EmitSetFromEnumerableHelper(ILGenerator il)
+    {
+        if (!_methodBuilders.TryGetValue("<CulebralSet>", out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod("<CulebralSet>",
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(HashSet<object>),
+                    [typeof(object)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "source");
+                _methodBuilders["<CulebralSet>"] = helper;
+
+                var hil = helper.GetILGenerator();
+                var resultLocal = hil.DeclareLocal(typeof(HashSet<object>));
+                hil.Emit(OpCodes.Newobj, typeof(HashSet<object>).GetConstructor(Type.EmptyTypes)!);
+                hil.Emit(OpCodes.Stloc, resultLocal);
+
+                var enumLocal = hil.DeclareLocal(typeof(System.Collections.IEnumerator));
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!);
+                hil.Emit(OpCodes.Stloc, enumLocal);
+
+                var loopStart = hil.DefineLabel();
+                var loopEnd = hil.DefineLabel();
+
+                hil.MarkLabel(loopStart);
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
+                hil.Emit(OpCodes.Brfalse, loopEnd);
+
+                hil.Emit(OpCodes.Ldloc, resultLocal);
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
+                hil.Emit(OpCodes.Callvirt, typeof(HashSet<object>).GetMethod("Add", [typeof(object)])!);
+                hil.Emit(OpCodes.Pop); // Add returns bool
+
+                hil.Emit(OpCodes.Br, loopStart);
+                hil.MarkLabel(loopEnd);
+
+                hil.Emit(OpCodes.Ldloc, resultLocal);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>
+    /// Helper: Iterate an IEnumerable (from arg at argIndex) and add each element to a List&lt;object&gt;.
+    /// Used by sorted, reversed, and list helpers.
+    /// </summary>
+    private static void EmitIterateAndCollect(ILGenerator il, LocalBuilder listLocal, int argIndex, bool sourceIsIEnumerable = false)
+    {
+        var enumLocal = il.DeclareLocal(typeof(System.Collections.IEnumerator));
+        il.Emit(argIndex == 0 ? OpCodes.Ldarg_0 : OpCodes.Ldarg_1);
+        if (!sourceIsIEnumerable)
+            il.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+        il.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!);
+        il.Emit(OpCodes.Stloc, enumLocal);
+
+        var loopStart = il.DefineLabel();
+        var loopEnd = il.DefineLabel();
+
+        il.MarkLabel(loopStart);
+        il.Emit(OpCodes.Ldloc, enumLocal);
+        il.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
+        il.Emit(OpCodes.Brfalse, loopEnd);
+
+        il.Emit(OpCodes.Ldloc, listLocal);
+        il.Emit(OpCodes.Ldloc, enumLocal);
+        il.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
+        il.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("Add")!);
+
+        il.Emit(OpCodes.Br, loopStart);
+        il.MarkLabel(loopEnd);
+    }
+
+    /// <summary>
+    /// Emits a truthiness check for the value on top of the stack (object).
+    /// If falsy (null, false, 0, or ""), branches to falsyLabel.
+    /// Consumes the value from the stack.
+    /// </summary>
+    private static void EmitTruthinessCheck(ILGenerator il, Label falsyLabel)
+    {
+        var valueLocal = il.DeclareLocal(typeof(object));
+        il.Emit(OpCodes.Stloc, valueLocal);
+
+        // Check null
+        il.Emit(OpCodes.Ldloc, valueLocal);
+        il.Emit(OpCodes.Brfalse, falsyLabel);
+
+        // Check if bool and false
+        var notBool = il.DefineLabel();
+        il.Emit(OpCodes.Ldloc, valueLocal);
+        il.Emit(OpCodes.Isinst, typeof(bool));
+        il.Emit(OpCodes.Brfalse, notBool);
+        il.Emit(OpCodes.Ldloc, valueLocal);
+        il.Emit(OpCodes.Unbox_Any, typeof(bool));
+        il.Emit(OpCodes.Brfalse, falsyLabel);
+        var done = il.DefineLabel();
+        il.Emit(OpCodes.Br, done);
+        il.MarkLabel(notBool);
+
+        // Check if int and 0
+        var notInt = il.DefineLabel();
+        il.Emit(OpCodes.Ldloc, valueLocal);
+        il.Emit(OpCodes.Isinst, typeof(int));
+        il.Emit(OpCodes.Brfalse, notInt);
+        il.Emit(OpCodes.Ldloc, valueLocal);
+        il.Emit(OpCodes.Unbox_Any, typeof(int));
+        il.Emit(OpCodes.Brfalse, falsyLabel);
+        il.Emit(OpCodes.Br, done);
+        il.MarkLabel(notInt);
+
+        // Check if string and empty
+        var notString = il.DefineLabel();
+        il.Emit(OpCodes.Ldloc, valueLocal);
+        il.Emit(OpCodes.Isinst, typeof(string));
+        il.Emit(OpCodes.Brfalse, notString);
+        il.Emit(OpCodes.Ldloc, valueLocal);
+        il.Emit(OpCodes.Castclass, typeof(string));
+        il.Emit(OpCodes.Call, typeof(string).GetMethod("IsNullOrEmpty", [typeof(string)])!);
+        il.Emit(OpCodes.Brtrue, falsyLabel);
+        il.Emit(OpCodes.Br, done);
+        il.MarkLabel(notString);
+
+        // Otherwise it's truthy (non-null, non-bool, non-int, non-string object)
+        il.MarkLabel(done);
+    }
+
     private void EmitToString(ILGenerator il, CulebralType sourceType)
     {
         // If already a string, nothing to do
@@ -2170,10 +3364,15 @@ public sealed class CilEmitter
             IrLoadField { DeclaringType: var fdt, FieldName: var fn }
                 when _fieldBuilders.TryGetValue($"{fdt}.{fn}", out var lfb)
                 => lfb.FieldType,
-            IrCallBuiltin { Name: "len" or "int" or "ord" or "round" or "abs" or "min" or "max" } => typeof(int),
+            IrCallBuiltin { Name: "round", ArgCount: 2 } => typeof(double),
+            IrCallBuiltin { Name: "min" or "max", ArgCount: 1 } => typeof(object),
+            IrCallBuiltin { Name: "len" or "int" or "ord" or "round" or "abs" or "min" or "max" or "sum" or "hash" } => typeof(int),
             IrCallBuiltin { Name: "float" } => typeof(double),
             IrCallBuiltin { Name: "str" or "chr" or "type" or "input" } => typeof(string),
-            IrCallBuiltin { Name: "bool" } => typeof(bool),
+            IrCallBuiltin { Name: "bool" or "all" or "any" or "isinstance" } => typeof(bool),
+            IrCallBuiltin { Name: "sorted" or "reversed" or "enumerate" or "zip" or "map" or "filter" or "list" } => typeof(List<object>),
+            IrCallBuiltin { Name: "set" } => typeof(HashSet<object>),
+            IrCallBuiltin { Name: "dict" } => typeof(Dictionary<object, object>),
             IrUnaryOp { Op: IrUnaryOpKind.LogicalNot } => typeof(bool),
             IrUnaryOp { Op: IrUnaryOpKind.Negate } => typeof(int),
             IrToString => typeof(string),

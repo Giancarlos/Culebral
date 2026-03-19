@@ -1135,14 +1135,13 @@ public class EmitTests : IDisposable
     [Fact]
     public void Range_ThreeArgs_Basic()
     {
-        // 3-arg range(0, 10, 2) → Range(0, 5) → 0,1,2,3,4
-        // This is approximate — true stepped iteration needs runtime support
+        // 3-arg range(0, 10, 2) → 0,2,4,6,8
         var output = CompileAndRun("""
             def main():
                 for i in range(0, 10, 2):
                     print(i)
             """);
-        Assert.Equal("0\n1\n2\n3\n4", output);
+        Assert.Equal("0\n2\n4\n6\n8", output);
     }
 
     // ─── Phase 4 Batch 2: Pattern Matching & __str__ ───
@@ -2677,5 +2676,332 @@ public class EmitTests : IDisposable
                 print(1, 2, 3)
             """);
         Assert.Equal("1 2 3", output);
+    }
+
+    // ─── Tier 1 Built-in Functions ───
+
+    [Fact]
+    public void Bool_IntTruthiness()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(bool(0))
+                print(bool(1))
+                print(bool(-1))
+            """);
+        Assert.Equal("False\nTrue\nTrue", output);
+    }
+
+    [Fact]
+    public void Bool_StringTruthiness()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(bool(""))
+                print(bool("hi"))
+            """);
+        Assert.Equal("False\nTrue", output);
+    }
+
+    [Fact]
+    public void Sorted_BasicList()
+    {
+        var output = CompileAndRun("""
+            def main():
+                xs = sorted([3, 1, 2])
+                for x in xs:
+                    print(x)
+            """);
+        Assert.Equal("1\n2\n3", output);
+    }
+
+    [Fact]
+    public void Reversed_BasicList()
+    {
+        var output = CompileAndRun("""
+            def main():
+                xs = reversed([1, 2, 3])
+                for x in xs:
+                    print(x)
+            """);
+        Assert.Equal("3\n2\n1", output);
+    }
+
+    [Fact]
+    public void Enumerate_BasicList()
+    {
+        var output = CompileAndRun("""
+            def main():
+                xs = enumerate(["a", "b", "c"])
+                print(len(xs))
+            """);
+        Assert.Equal("3", output);
+    }
+
+    [Fact]
+    public void Zip_BasicLists()
+    {
+        var output = CompileAndRun("""
+            def main():
+                xs = zip([1, 2, 3], [4, 5, 6])
+                print(len(xs))
+            """);
+        Assert.Equal("3", output);
+    }
+
+    [Fact]
+    public void All_TrueCase()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(all([True, True, True]))
+            """);
+        Assert.Equal("True", output);
+    }
+
+    [Fact]
+    public void All_FalseCase()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(all([True, False, True]))
+            """);
+        Assert.Equal("False", output);
+    }
+
+    [Fact]
+    public void Any_TrueCase()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(any([False, True, False]))
+            """);
+        Assert.Equal("True", output);
+    }
+
+    [Fact]
+    public void Any_FalseCase()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(any([False, False, False]))
+            """);
+        Assert.Equal("False", output);
+    }
+
+    [Fact]
+    public void Sum_BasicList()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(sum([1, 2, 3, 4]))
+            """);
+        Assert.Equal("10", output);
+    }
+
+    [Fact]
+    public void List_FromRange()
+    {
+        var output = CompileAndRun("""
+            def main():
+                xs = list(range(3))
+                print(len(xs))
+                for x in xs:
+                    print(x)
+            """);
+        Assert.Equal("3\n0\n1\n2", output);
+    }
+
+    [Fact]
+    public void Dict_Empty()
+    {
+        var output = CompileAndRun("""
+            def main():
+                d = dict()
+                print(len(d))
+            """);
+        Assert.Equal("0", output);
+    }
+
+    [Fact(Skip = "set is a keyword in the parser (used for property setters); set() builtin requires parser changes")]
+    public void Set_FromList()
+    {
+        var output = CompileAndRun("""
+            def main():
+                s = set([1, 2, 2, 3, 3])
+                print(len(s))
+            """);
+        Assert.Equal("3", output);
+    }
+
+    [Fact]
+    public void Hash_Integer()
+    {
+        var output = CompileAndRun("""
+            def main():
+                h = hash(42)
+                print(type(h))
+            """);
+        // GetHashCode returns Int32
+        Assert.Equal("Int32", output);
+    }
+
+    [Fact]
+    public void Isinstance_IntCheck()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(isinstance(42, "int"))
+            """);
+        Assert.Equal("True", output);
+    }
+
+    [Fact]
+    public void Isinstance_StrCheck()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(isinstance("hello", "str"))
+            """);
+        Assert.Equal("True", output);
+    }
+
+    // ─── Tier 1: Builtin Overloads, Truthiness, Negative Indexing, True Division ───
+
+    [Fact]
+    public void Min_Iterable_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(min([3, 1, 2]))
+            """);
+        Assert.Equal("1", output);
+    }
+
+    [Fact]
+    public void Max_Iterable_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(max([3, 1, 2]))
+            """);
+        Assert.Equal("3", output);
+    }
+
+    [Fact]
+    public void Range_NegativeStep_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                for i in range(5, 0, -1):
+                    print(i)
+            """);
+        Assert.Equal("5\n4\n3\n2\n1", output);
+    }
+
+    [Fact]
+    public void Round_TwoArgs_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(round(3.14159, 2))
+            """);
+        Assert.Equal("3.14", output);
+    }
+
+    [Fact]
+    public void Int_WithBase_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(int("ff", 16))
+            """);
+        Assert.Equal("255", output);
+    }
+
+    [Fact]
+    public void Truthiness_NonEmptyList_IsTrue()
+    {
+        var output = CompileAndRun("""
+            def main():
+                if [1, 2, 3]:
+                    print("truthy")
+                else:
+                    print("falsy")
+            """);
+        Assert.Equal("truthy", output);
+    }
+
+    [Fact]
+    public void Truthiness_EmptyList_IsFalse()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = []
+                if items:
+                    print("truthy")
+                else:
+                    print("falsy")
+            """);
+        Assert.Equal("falsy", output);
+    }
+
+    [Fact]
+    public void Truthiness_EmptyString_IsFalse()
+    {
+        var output = CompileAndRun("""
+            def main():
+                if "":
+                    print("truthy")
+                else:
+                    print("falsy")
+            """);
+        Assert.Equal("falsy", output);
+    }
+
+    [Fact]
+    public void Truthiness_Zero_IsFalse()
+    {
+        var output = CompileAndRun("""
+            def main():
+                if 0:
+                    print("truthy")
+                else:
+                    print("falsy")
+            """);
+        Assert.Equal("falsy", output);
+    }
+
+    [Fact]
+    public void NegativeIndex_LastElement()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = [10, 20, 30]
+                print(items[-1])
+            """);
+        Assert.Equal("30", output);
+    }
+
+    [Fact]
+    public void TrueDivision_IntOperands_ReturnsFloat()
+    {
+        var output = CompileAndRun("""
+            def main():
+                x = 10 / 3
+                print(x)
+            """);
+        // Should produce a float, not integer 3
+        Assert.Contains("3.3333", output);
+    }
+
+    [Fact]
+    public void FloorDivision_IntOperands_ReturnsInt()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(10 // 3)
+            """);
+        Assert.Equal("3", output);
     }
 }
