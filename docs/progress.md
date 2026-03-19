@@ -1,8 +1,23 @@
-# Skelvon Compiler — Implementation Progress
+# Culebral Compiler — Implementation Progress
 
-## Status: Phase 2 Complete — Type System + Classes
+## Status: Phase 3 Complete — .NET Interop
 
 The compiler implements a full pipeline: Source → Lexer → Parser → Type Checker → IR → CIL Emitter → .NET Assembly.
+
+### Phase 3 Additions (Complete)
+- **BCL imports**: `from System.IO import File` resolves via reflection
+- **Namespace aliases**: `import System.IO as io` with chained resolution
+- **Static method calls**: `File.read_all_text(path)` with snake_case bridging
+- **Instance method calls**: `sb.append("text")` on .NET type instances
+- **Property access**: static and instance properties via snake→pascal resolution
+- **Constructor resolution**: `StringBuilder()` → `newobj` with arg count matching
+- **Case convention bridging**: `read_all_text` ↔ `ReadAllText` bidirectional
+- **Generic method calls**: `Array.empty[int]()` → `MakeGenericMethod` with type arg resolution
+- **Extension methods (LINQ)**: `items.count()`, `items.first()`, `items.any()` from `System.Linq.Enumerable`
+- **Extension method type inference**: auto-infers generic type args from receiver type
+- **Auto-boxing for extension results**: value type returns auto-boxed for object locals
+- **NuGet package resolution**: `culebral.toml` parsing → `dotnet restore` → assembly loading
+- **List literal boxing**: value types auto-boxed when added to `List<object>`
 
 ### Phase 2 Additions
 - **Class instantiation**: `c = Counter(10)` → `newobj .ctor`
@@ -61,6 +76,7 @@ The compiler implements a full pipeline: Source → Lexer → Parser → Type Ch
 - Class/struct/record/enum/interface registration
 - Undefined name detection
 - Type compatibility checking (assignment, widening)
+- Generic method return type inference via `MakeGenericMethod`
 
 ### IR (`IR/`)
 - Basic block-based intermediate representation
@@ -73,6 +89,7 @@ The compiler implements a full pipeline: Source → Lexer → Parser → Type Ch
 - Property lowering to getter/setter methods
 - String concatenation type tracking
 - Top-level statement wrapping (script mode)
+- .NET interop instructions: generic calls, extension methods
 
 ### CIL Emitter (`Emit/`)
 - PersistedAssemblyBuilder with ManagedPEBuilder for assembly generation
@@ -87,14 +104,24 @@ The compiler implements a full pipeline: Source → Lexer → Parser → Type Ch
 - Control flow: branches, conditional branches
 - Stack type inference for correct method overload selection
 - Entry point configuration
+- Generic method emission via `MakeGenericMethod`
+- Extension method emission as static calls with auto-boxing
 
 ### CLI (`Program.cs`)
-- `skelvon build <file.skv>` — compile to .dll
-- `skelvon run <file.skv>` — compile and execute
-- `skelvon check <file.skv>` — type-check only
-- `skelvon lex <file.skv>` — debug token output
-- `skelvon parse <file.skv>` — debug AST output
-- `skelvon ir <file.skv>` — debug IR output
+- `culebral build <file.cbl>` — compile to .dll
+- `culebral run <file.cbl>` — compile and execute
+- `culebral check <file.cbl>` — type-check only
+- `culebral lex <file.cbl>` — debug token output
+- `culebral parse <file.cbl>` — debug AST output
+- `culebral ir <file.cbl>` — debug IR output
+- Auto-discovery of `culebral.toml` for NuGet resolution
+
+### NuGet (`NuGet/`)
+- `culebral.toml` parsing: `[project]` and `[dependencies]` sections
+- Package version strings and framework references
+- Temp .csproj generation → `dotnet restore` for resolution
+- Asset file parsing to discover assembly paths
+- Assembly loading for compile-time type resolution
 
 ## Verified Working Programs
 
@@ -129,50 +156,73 @@ The compiler implements a full pipeline: Source → Lexer → Parser → Type Ch
 - Interface definitions and implementation
 - Classes implementing multiple interfaces
 
-## Test Suite
-- 113 tests total, all passing
-- Lexer tests: 14 (tokens, literals, indentation, brackets, edge cases)
-- Parser tests: 30 (all language constructs)
-- Type checker tests: 10 (symbols, types, errors)
-- End-to-end emit tests: 59 (compile → run → verify output)
-  - Phase 1 core: 20 tests (functions, control flow, arithmetic, strings)
-  - Phase 1 completion: 9 tests (mutual recursion, floats, nested loops, defaults, booleans, break/continue)
-  - Phase 2 core: 9 tests (classes, constructors, fields, @field, interfaces)
-  - Phase 2 completion: 10 tests (structs, records, properties, generics)
-  - Phase 3: 11 tests (.NET interop, imports, case bridging, BCL access)
+### Phase 3 (.NET Interop)
+- BCL static method calls with case bridging
+- Namespace aliases and chaining
+- .NET constructors and instance methods
+- File I/O, Math, Environment, StringBuilder
+- String instance methods (to_upper, contains, replace, etc.)
+- Generic static methods (`Array.empty[int]()`, `Activator.create_instance[T]()`)
+- LINQ extension methods (`count`, `first`, `last`, `any`, `contains`, `to_array`)
 
-## Known Limitations / Next Steps
-
-### Phase 3 (.NET Interop) — Remaining
-- NuGet package resolution
-- Extension methods (LINQ)
-- .NET generic method calls
-
-### Phase 4 (Language Completeness) — Next
-**Core operators & statements (not in any prior phase):**
-- `is` / `is not` operators (runtime type checks, null checks)
+### Phase 4 Batch 1 — Core Operators (Complete)
+- `is` / `is not` operators (runtime type checks and null checks)
 - `in` / `not in` operators (collection membership)
 - `raise` statement (throw exceptions)
 - `try`/`except`/`finally` (exception handling)
 - `**` (power) and `//` (floor division) operator emission
 - `range(start, stop)` and `range(start, stop, step)` overloads
-- Multiple assignment / tuple unpacking (`a, b = b, a`)
-- `*args` unpacking (maps to `params T[]`)
-- `__str__` / `__repr__` → `ToString()` mapping
+- `__str__` → `ToString()` mapping
+- Pattern matching with algebraic enum dispatch
 
-**Major language features:**
-- Pattern matching with exhaustiveness (match/case codegen)
-- Algebraic enum match codegen
-- Async/await codegen
-- Lambda expressions → delegates
-- Comprehensions (list, dict, set, generator) full codegen
-- `with` statement → IDisposable / using
-- Null safety with flow typing
-- Slicing (`items[1:3]`, `items[::-1]`)
+### Phase 4 Batch 2 — Language Features (Complete)
+- **Lambda expressions** → delegate emission with `IrCreateDelegate`
+- **`with` statement** → `IDisposable` / `try-finally` desugaring
+- **Set literals** → `HashSet<object>` creation
+- **Dict literals** → `Dictionary<object, object>` creation
+- **Dict comprehensions** → dictionary construction with loop
+- **Slicing** → `list[a:b]`, `string[a:b]` with runtime helper
+- **Tuple unpacking** → `a, b = b, a` with correct swap semantics
+- **`*args` variadic parameters** → `params object[]` with `[ParamArray]`
+- **Record `with` expressions** → `p1 with (x=10)` creates modified copy
+- **Type aliases** → `type Count = int` (compile-time erasure)
+- **Explicit type casts** → `IrCastClass` emission
+- **Delegate invocation** → `IrInvokeDelegate` for calling function parameters
+
+### Phase 4 Batch 3 — Advanced Type System (Complete)
+- **Operator overloading** — 16 dunder methods: `__eq__`, `__ne__`, `__lt__`, `__le__`, `__gt__`, `__ge__`, `__add__`, `__sub__`, `__mul__`, `__truediv__`, `__mod__`, `__hash__`, `__len__`, `__getitem__`, `__contains__`, `__str__`
+- **Comparison chaining** → `a < b < c` desugared to `a < b and b < c`
+- **Generic constraints enforcement** → `T: Printable` checked at instantiation
+- **Default interface implementations** → inherited by implementing classes
+- **True struct value-type semantics** → inherits from `System.ValueType`, sequential layout
+- **Decorator emission** → .NET attributes applied via `CustomAttributeBuilder`
+- **For-else / while-else** → else block runs if loop completes without break
+- **`yield` statement** → generator functions returning `IEnumerable<object>`
+- **`assert` statement** → conditional throw with optional message
+- **Built-in functions** → `abs`, `min`, `max`, `chr`, `ord`, `type`, `input`, `round`
+
+## Test Suite
+- 212 tests total, all passing
+- Lexer tests: 14 (tokens, literals, indentation, brackets, edge cases)
+- Parser tests: 39 (all language constructs including tuples, for-else, while-else)
+- Type checker tests: 12 (symbols, types, errors, generic constraints)
+- End-to-end emit tests: 147 (compile → run → verify output)
+  - Phase 1: 29 tests (functions, control flow, arithmetic, strings, recursion, booleans)
+  - Phase 2: 19 tests (classes, constructors, fields, @field, interfaces, structs, records)
+  - Phase 3: 22 tests (.NET interop, imports, case bridging, generics, extension methods, NuGet)
+  - Phase 4 batch 1: 16 tests (is/not, try/except, raise, power, floor div, match)
+  - Phase 4 batch 2: 25 tests (sets, dicts, with, tuples, lambdas, slicing, casts, record-with, type aliases)
+  - Phase 4 batch 3: 36 tests (dunder methods, comparison chaining, generics, decorators, for-else, yield, assert, builtins)
+
+## Known Limitations / Next Steps
+
+### Phase 4 Remaining
+- Async/await codegen (Task-based state machine)
+- `async for` / `async with`
+- Null safety with flow typing (type narrowing after null checks)
 - Named tuple returns and destructuring
-- Record `with` expressions
-- Type alias (`type X = Y`)
-- Decorator emission (attributes and wrappers)
-- Generic constraints enforcement
-- True struct value-type semantics
+- PDB debug information / source maps
 - LSP server for editor support
+
+### Phase 5 — Standard Library
+### Phase 6 — Native Modules (LLVM)

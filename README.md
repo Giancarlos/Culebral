@@ -14,7 +14,7 @@
 
 ---
 
-Skelvon is a statically typed, compiled programming language that reads like Python and runs on .NET. Function signatures are contracts. Bodies are inferred. The entire BCL and NuGet ecosystem is one import away.
+Culebral is a statically typed, compiled programming language that reads like Python and runs on .NET. Function signatures are contracts. Bodies are inferred. The entire BCL and NuGet ecosystem is one import away.
 
 ```python
 def fibonacci(n: int) -> int:
@@ -28,7 +28,7 @@ def main():
 ```
 
 ```
-$ skelvon run fibonacci.skv
+$ culebral run fibonacci.cbl
 fib(0) = 0
 fib(1) = 1
 fib(2) = 1
@@ -57,18 +57,18 @@ fib(9) = 34
 
 ```bash
 # Clone and build the compiler
-git clone git@github.com:Giancarlos/Skelvon.git
-cd Skelvon
+git clone git@github.com:Giancarlos/Culebral.git
+cd Culebral
 dotnet build
 
 # Write your first program
-cat > hello.skv << 'EOF'
+cat > hello.cbl << 'EOF'
 def main():
-    print("Hello from Skelvon!")
+    print("Hello from Culebral!")
 EOF
 
 # Compile and run
-dotnet run --project src/Skelvon.Compiler -- run hello.skv
+dotnet run --project src/Culebral.Compiler -- run hello.cbl
 ```
 
 ## The Language
@@ -171,7 +171,7 @@ async def fetch(url: str) -> str:
 ```
 
 ```toml
-# skelvon.toml
+# culebral.toml
 [project]
 name = "my-app"
 target = "net10.0"
@@ -200,7 +200,7 @@ Indentation blocks · f-strings · comprehensions · slicing · `for x in collec
 <details>
 <summary><b>Changed from Python</b></summary>
 
-| Python | Skelvon | Why |
+| Python | Culebral | Why |
 |--------|---------|-----|
 | `None` | `None` (but `T?` required) | Must opt in to nullability |
 | `class` | `class` / `struct` / `enum` | Separate value and sum types |
@@ -215,7 +215,7 @@ Indentation blocks · f-strings · comprehensions · slicing · `for x in collec
 ## Architecture
 
 ```
-Source (.skv)
+Source (.cbl)
     │
     ▼
 ┌──────────┐
@@ -247,21 +247,21 @@ Source (.skv)
 ### Project Structure
 
 ```
-skelvon/
-├── src/Skelvon.Compiler/
+culebral/
+├── src/Culebral.Compiler/
 │   ├── Lexer/           # Indentation-aware tokenizer
 │   ├── Parser/          # Recursive descent parser + AST
 │   ├── Semantics/       # Type system, symbol table, checker
-│   ├── IR/              # SkelvonIR + AST→IR lowering
+│   ├── IR/              # CulebralIR + AST→IR lowering
 │   ├── Emit/            # CIL emitter via Reflection.Emit
 │   ├── Diagnostics/     # Error/warning reporting
 │   └── Program.cs       # CLI entry point
-├── tests/Skelvon.Compiler.Tests/
+├── tests/Culebral.Compiler.Tests/
 │   ├── LexerTests.cs    # 14 tests
 │   ├── ParserTests.cs   # 30 tests
 │   ├── TypeCheckerTests.cs  # 10 tests
 │   └── EmitTests.cs     # 20 end-to-end tests
-├── samples/             # Example .skv programs
+├── samples/             # Example .cbl programs
 └── spec.md              # Full language specification
 ```
 
@@ -276,27 +276,27 @@ dotnet build
 # Run tests
 dotnet test
 
-# Compile a Skelvon program
-dotnet run --project src/Skelvon.Compiler -- build samples/hello.skv
+# Compile a Culebral program
+dotnet run --project src/Culebral.Compiler -- build samples/hello.cbl
 
 # Compile and run in one step
-dotnet run --project src/Skelvon.Compiler -- run samples/hello.skv
+dotnet run --project src/Culebral.Compiler -- run samples/hello.cbl
 
 # Type-check without compiling
-dotnet run --project src/Skelvon.Compiler -- check samples/fibonacci.skv
+dotnet run --project src/Culebral.Compiler -- check samples/fibonacci.cbl
 ```
 
 ### Debug Commands
 
 ```bash
 # Print lexer tokens
-dotnet run --project src/Skelvon.Compiler -- lex samples/hello.skv
+dotnet run --project src/Culebral.Compiler -- lex samples/hello.cbl
 
 # Print parse tree
-dotnet run --project src/Skelvon.Compiler -- parse samples/hello.skv
+dotnet run --project src/Culebral.Compiler -- parse samples/hello.cbl
 
-# Print SkelvonIR
-dotnet run --project src/Skelvon.Compiler -- ir samples/fibonacci.skv
+# Print CulebralIR
+dotnet run --project src/Culebral.Compiler -- ir samples/fibonacci.cbl
 ```
 
 ## Roadmap
@@ -307,7 +307,7 @@ dotnet run --project src/Skelvon.Compiler -- ir samples/fibonacci.skv
 | **2** | Type system + classes — generics, constructors, interfaces, `@field` | Next |
 | **3** | .NET interop — BCL imports, case bridging, NuGet resolution | Planned |
 | **4** | Language completeness — async/await, pattern matching, records, null safety | Planned |
-| **5** | Standard library — `skelvon.result`, `skelvon.io`, thin BCL wrappers | When needed |
+| **5** | Standard library — `culebral.result`, `culebral.io`, thin BCL wrappers | When needed |
 | **6** | Native modules — LLVM backend for `@native` hot paths | Future |
 
 ## License

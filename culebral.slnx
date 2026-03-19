@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Culebral.Compiler/Culebral.Compiler.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Culebral.Compiler.Tests/Culebral.Compiler.Tests.csproj" />
+  </Folder>
+</Solution>

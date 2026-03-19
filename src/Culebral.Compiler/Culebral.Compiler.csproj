@@ -1,0 +1,24 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>14</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>culebral</AssemblyName>
+    <RootNamespace>Culebral.Compiler</RootNamespace>
+
+    <!-- .NET Tool packaging -->
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>culebral</ToolCommandName>
+    <PackageId>Culebral.Compiler</PackageId>
+    <Version>0.1.0-alpha</Version>
+    <Authors>Giancarlos Toro</Authors>
+    <Description>The Culebral programming language compiler — Python's readability, Rust's discipline, .NET's power.</Description>
+    <PackageProjectUrl>https://github.com/Giancarlos/Culebral</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Giancarlos/Culebral</RepositoryUrl>
+  </PropertyGroup>
+
+</Project>
