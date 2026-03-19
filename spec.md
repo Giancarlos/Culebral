@@ -2526,6 +2526,408 @@ result = converter.convert[str, int](value)
 
 ---
 
+### 4.33 Operator Behavior Gaps — Python Semantics
+
+Culebral lexes and parses all Python operators, but several have **behavioral gaps** where the Culebral operator does less than Python's equivalent. These break common Python idioms when porting code.
+
+#### 4.33.1 Truthiness in Boolean Context
+
+**Status:** Not implemented. `if x:` only works when `x` is a `bool`. Empty collections, zero values, empty strings, and `None` are not treated as falsy.
+
+**What Python does:** Every value has a truth value. These are falsy:
+- `False`, `0`, `0.0`
+- `""` (empty string)
+- `None`
+- `[]`, `()`, `{}`, `set()` (empty collections)
+- Objects where `__bool__()` returns `False` or `__len__()` returns `0`
+
+Everything else is truthy. This means Python code like this is extremely common:
+
+```python
+items = get_items()
+if items:                    # truthy check — not empty
+    process(items)
+
+name = get_name()
+if not name:                 # falsy check — empty string or None
+    name = "Anonymous"
+
+while queue:                 # loop until empty
+    item = queue.pop()
+```
+
+**Compilation target:** When a non-bool expression appears in a boolean context (`if`, `while`, `and`, `or`, `not`, `bool()`), the compiler must emit a truthiness test:
+
+```
+// For object x in boolean context:
+// 1. If x is bool → use directly
+// 2. If x is int → ceq 0, then negate (nonzero = true)
+// 3. If x is float → ceq 0.0, then negate
+// 4. If x is string → call String.IsNullOrEmpty, then negate
+// 5. If x is None/null → false
+// 6. If x is a collection → call .Count or ICollection.Count, cgt 0
+// 7. If x has __bool__ → call it
+// 8. If x has __len__ → call it, cgt 0
+// 9. Otherwise → true (non-null reference)
+```
+
+**Performance considerations:**
+- The type-specific fast paths (int, string, etc.) are single-instruction tests. No allocation, no virtual dispatch.
+- For the `object` fallback, a type-check cascade (`isinst`) is needed. The JIT will optimize this to a vtable check.
+- This truthiness test should be emitted as a helper method to avoid code bloat at every `if` site.
+
+**Why this is critical:** Nearly all Python code uses truthiness. `if items:`, `while queue:`, `name or "default"` — these are everywhere. Without truthiness support, porting any Python code to Culebral requires rewriting every conditional.
+
+---
+
+#### 4.33.2 True Division (`/` Always Returns Float)
+
+**Status:** Not implemented. `10 / 3` likely returns `3` (integer division) instead of `3.333...`.
+
+**What Python does:** The `/` operator ALWAYS returns a float, even for integer operands. `//` is for integer floor division.
+
+```python
+10 / 3      # 3.3333333333333335 (float)
+10 // 3     # 3 (int)
+10 / 2      # 5.0 (float, NOT int 5)
+```
+
+**Compilation target:** When both operands of `/` are `int`, the compiler must:
+1. Convert both to `double` (`conv.r8`)
+2. Emit `div` (floating-point division)
+3. The result type is `float`, not `int`
+
+When either operand is already `float`, just emit `div` as normal.
+
+**Performance considerations:**
+- The `conv.r8` is a single-cycle instruction. Negligible cost.
+- The result being `double` instead of `int32` affects downstream operations. The type checker must propagate this correctly.
+
+---
+
+#### 4.33.3 Negative Indexing
+
+**Status:** Not implemented. `items[-1]` throws `IndexOutOfRangeException` instead of returning the last element.
+
+**What Python does:** Negative indices count from the end:
+
+```python
+items = [10, 20, 30, 40, 50]
+items[-1]       # 50 (last)
+items[-2]       # 40 (second to last)
+items[-5]       # 10 (first)
+
+name = "Culebral"
+name[-1]        # "l" (last character)
+
+items[-1] = 99  # assignment to last element
+```
+
+**Compilation target:** Before any index operation, check if the index is negative. If so, add the collection length:
+
+```
+// items[index] where index might be negative:
+evaluate index
+dup
+ldc.i4.0
+bge positive          // if index >= 0, skip adjustment
+evaluate items.Count  // (or .Length for strings/arrays)
+add                   // index = index + length
+positive:
+// now proceed with the adjusted non-negative index
+```
+
+**Performance considerations:**
+- The branch adds ~1 cycle for positive indices (branch predicted taken). For negative indices, adds a `.Count`/`.Length` load + add.
+- For compile-time-constant positive indices (e.g., `items[0]`, `items[3]`), the check can be elided entirely.
+- For slicing, negative indices in `start`/`stop`/`step` all need the same adjustment.
+
+---
+
+#### 4.33.4 List Concatenation (`+`) and Repetition (`*`)
+
+**Status:** Not implemented. `[1,2] + [3,4]` attempts arithmetic addition. `[0] * 5` attempts arithmetic multiplication.
+
+**What Python does:**
+
+```python
+[1, 2] + [3, 4]        # [1, 2, 3, 4] (concatenation)
+[0] * 5                 # [0, 0, 0, 0, 0] (repetition)
+[1, 2] * 3              # [1, 2, 1, 2, 1, 2]
+```
+
+**Compilation target:**
+
+**List `+` (concatenation):**
+```
+// [a, b] + [c, d] → new list, addrange both
+new List<object>(left)    // copy left list
+stloc result
+ldloc result
+ldloc right
+callvirt List<object>.AddRange(IEnumerable<object>)
+ldloc result
+```
+
+**List `*` (repetition):**
+```
+// list * n → new list, add original n times
+new List<object>(list.Count * n)   // pre-allocate capacity
+stloc result
+// loop n times:
+    ldloc result
+    ldloc source
+    callvirt List<object>.AddRange(IEnumerable<object>)
+ldloc result
+```
+
+**Detection:** In the lowering pass, when emitting `IrBinaryOp(Add)` or `IrBinaryOp(Mul)`, check the operand types from the type checker. If either operand is a list type, switch to the collection operation instead of arithmetic.
+
+**Performance considerations:**
+- Pre-allocate the result list with the known capacity: `left.Count + right.Count` for concatenation, `list.Count * n` for repetition. This avoids all internal resizing.
+- For `list * 0` or `list * 1`, short-circuit to empty list or shallow copy.
+
+---
+
+#### 4.33.5 String Repetition (`*`)
+
+**Status:** Not implemented. `"ha" * 3` attempts arithmetic multiplication on a string.
+
+**What Python does:**
+
+```python
+"ha" * 3        # "hahaha"
+3 * "ha"        # "hahaha" (commutative)
+"-" * 40        # "----------------------------------------"
+```
+
+**Compilation target:**
+
+```
+// "ha" * 3 →
+ldstr "ha"
+ldc.i4.3
+// In .NET: new string can't repeat, but StringBuilder can:
+// OR simpler: String.Concat(Enumerable.Repeat("ha", 3))
+// OR simplest in .NET 8+: string.Create(len, state, action)
+// Pragmatic: new StringBuilder(str.Length * n).Insert(0, str, n).ToString()
+call StringBuilder::.ctor(int)  // capacity = str.Length * n
+ldloc sb
+ldstr "ha"
+ldc.i4.3
+call StringBuilder::Insert(int, string, int)  // Insert(0, str, count)
+callvirt StringBuilder::ToString()
+```
+
+**Detection:** Same as list — check operand types in lowering. If one operand is `str` and the other is `int`, emit string repetition.
+
+---
+
+#### 4.33.6 String `in` (Substring Check)
+
+**Status:** Not implemented. `"bc" in "abcd"` calls `.Contains()` on a string, which may not resolve correctly since the `in` operator currently targets collection types.
+
+**What Python does:**
+
+```python
+"bc" in "abcd"      # True (substring check)
+"x" in "abcd"       # False
+"" in "anything"     # True
+"hello" in "hello"   # True
+```
+
+**Compilation target:**
+
+```
+// "bc" in "abcd" →
+ldstr "abcd"
+ldstr "bc"
+callvirt String::Contains(string)  // returns bool
+```
+
+**Detection:** In the lowering of `InExpr`, check if the right-hand operand is a string. If so, emit `String.Contains(string)` instead of the generic collection `.Contains()`.
+
+---
+
+#### 4.33.7 Negative Exponents (`**`)
+
+**Status:** Unclear. `2 ** -1` should return `0.5` but may return `0` if integer arithmetic is used.
+
+**What Python does:**
+
+```python
+2 ** -1         # 0.5
+2 ** -2         # 0.25
+10 ** -3        # 0.001
+2 ** 0.5        # 1.4142135623730951 (square root)
+```
+
+**Compilation target:** The `**` operator already maps to `Math.Pow(double, double)`. Ensure both operands are converted to `double` before the call. The result type must be `float`, not `int`, whenever the exponent could be negative or fractional.
+
+**Fix:** In the type checker, when the `**` operator is used, always infer the result type as `float` (not `int`), since negative or fractional exponents produce floats. Alternatively, check if the exponent is a compile-time positive integer literal — only then return `int`.
+
+---
+
+#### 4.33.8 Dict Merge Operator (`|`)
+
+**Status:** Not implemented. The `|` operator only does bitwise OR.
+
+**What Python does (3.9+):**
+
+```python
+d1 = {"a": 1, "b": 2}
+d2 = {"b": 3, "c": 4}
+d3 = d1 | d2            # {"a": 1, "b": 3, "c": 4} (d2 wins on conflicts)
+d1 |= d2                # in-place merge
+```
+
+**Compilation target:**
+
+```
+// d1 | d2 →
+new Dictionary<object, object>(d1)   // copy d1
+stloc result
+// foreach (kvp in d2): result[kvp.Key] = kvp.Value
+ldloc result
+```
+
+**Detection:** In lowering, when `|` operands are both dict types, switch from `IrBinaryOp(BitOr)` to a dict merge operation.
+
+---
+
+#### 4.33.9 Chained Assignment
+
+**Status:** Not implemented. `a = b = c = 0` fails to parse.
+
+**What Python does:**
+
+```python
+a = b = c = 0       # all three set to 0
+x = y = []          # BOTH reference the SAME list (not copies)
+```
+
+**Compilation target:** Evaluate the RHS once, then store to each target left-to-right:
+
+```
+// a = b = c = 0
+ldc.i4.0
+dup
+stloc c
+dup
+stloc b
+stloc a
+```
+
+**Implementation:** In the parser, when an assignment `a = expr` is parsed and `expr` starts with another `identifier =`, chain them. Or simpler: parse `a = b = c = 0` as `AssignmentStatement(a, AssignmentStatement(b, AssignmentStatement(c, 0)))` and handle in lowering by evaluating the innermost value once and duplicating.
+
+**Warning:** `x = y = []` means both `x` and `y` point to the same list object. This is Python's behavior and Culebral should match it — it's assignment of references, not copying.
+
+---
+
+#### 4.33.10 Augmented Assignment on Collections
+
+**Status:** Not implemented. `items += [4, 5]` attempts arithmetic addition.
+
+**What Python does:**
+
+```python
+items = [1, 2, 3]
+items += [4, 5]         # items is now [1, 2, 3, 4, 5] (extend in-place)
+
+name = "hello"
+name += " world"        # "hello world" (string concatenation, already works)
+```
+
+**Compilation target:** In the lowering of `AugmentedAssignmentStatement`, check if the target is a list and the operator is `+=`. If so, emit `List.AddRange(rhs)` instead of arithmetic add + store.
+
+---
+
+### 4.34 Multiple Except Types
+
+**Status:** Not implemented. `except (TypeError, ValueError):` only catches the first type.
+
+**What Python does:**
+
+```python
+try:
+    risky_operation()
+except (ValueError, TypeError, KeyError) as e:
+    handle_error(e)
+```
+
+**Compilation target:** Emit multiple catch blocks that all branch to the same handler body:
+
+```
+.try {
+    <body>
+}
+catch [System.Runtime]System.ArgumentException {
+    stloc e
+    br handler
+}
+catch [System.Runtime]System.InvalidOperationException {
+    stloc e
+    br handler
+}
+handler:
+    <handler body using e>
+```
+
+**Implementation notes:**
+- The parser already handles `except ExceptionType` with a single type. Extend it to accept a tuple of types: `except (Type1, Type2, Type3)`.
+- The AST's `ExceptClause.ExceptionType` becomes a list of types instead of a single type.
+- The emitter generates one CIL catch block per exception type, all branching to a shared handler.
+
+---
+
+### 4.35 Call-Site Unpacking (`f(*args)`)
+
+**Status:** Parser handles `*args` in function definitions (parameter side). Call-site unpacking `f(*args)` is not implemented.
+
+**What Python does:**
+
+```python
+def greet(name: str, age: int):
+    print(f"{name} is {age}")
+
+args = ["Alice", 30]
+greet(*args)                # unpacks list into positional args
+
+def make_point(x: int, y: int, z: int):
+    return (x, y, z)
+
+coords = [1, 2, 3]
+p = make_point(*coords)     # unpacks into x=1, y=2, z=3
+```
+
+**Compilation target:** At the call site, when `*expr` appears in an argument list:
+1. Evaluate the iterable expression
+2. Extract elements by index (or iterate)
+3. Place each element on the stack as a positional argument
+4. Call the function normally
+
+For a known-length call (the function signature is known), the compiler can emit:
+```
+// f(*args) where f takes 3 params:
+ldloc args
+ldc.i4.0
+callvirt List<object>::get_Item(int)   // args[0]
+ldloc args
+ldc.i4.1
+callvirt List<object>::get_Item(int)   // args[1]
+ldloc args
+ldc.i4.2
+callvirt List<object>::get_Item(int)   // args[2]
+call f(object, object, object)
+```
+
+**Implementation notes:**
+- The parser needs to recognize `*expr` in call argument lists (not just in parameter definitions).
+- Add `IsUnpacked` flag to the `Argument` AST node.
+- The type checker must verify that the unpacked iterable has enough elements for the target function's parameters.
+
+---
+
 ## Deliberately Excluded Features
 
 These Python features are **intentionally excluded** from Culebral. This is not a gap — it's a design decision.
