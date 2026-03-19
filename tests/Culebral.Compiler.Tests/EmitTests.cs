@@ -2568,4 +2568,114 @@ public class EmitTests : IDisposable
             """);
         Assert.Equal("Meow\nI am an animal", output);
     }
+
+    // ─── Built-in Result Type ───
+
+    [Fact]
+    public void Result_OkAndErr_BasicUsage()
+    {
+        var output = CompileAndRun("""
+            def divide(a: int, b: int) -> Result:
+                if b == 0:
+                    return Err("division by zero")
+                return Ok(a // b)
+
+            def main():
+                r1 = divide(10, 2)
+                print(r1.is_ok)
+                print(r1.value)
+                r2 = divide(10, 0)
+                print(r2.is_ok)
+                print(r2.value)
+            """);
+        Assert.Equal("True\n5\nFalse\ndivision by zero", output);
+    }
+
+    [Fact]
+    public void Result_IsErr_Property()
+    {
+        var output = CompileAndRun("""
+            def main():
+                ok = Ok(42)
+                err = Err("oops")
+                print(ok.is_err)
+                print(err.is_err)
+            """);
+        Assert.Equal("False\nTrue", output);
+    }
+
+    [Fact]
+    public void Result_DirectConstruction()
+    {
+        var output = CompileAndRun("""
+            def main():
+                r = Ok("hello")
+                print(r.is_ok)
+                print(r.value)
+            """);
+        Assert.Equal("True\nhello", output);
+    }
+
+    // ─── Python-compatible print() tests ───
+
+    [Fact]
+    public void Print_MultipleArgs_SpaceSeparated()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print("hello", "world")
+            """);
+        Assert.Equal("hello world", output);
+    }
+
+    [Fact]
+    public void Print_CustomSeparator()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print("a", "b", "c", sep=", ")
+            """);
+        Assert.Equal("a, b, c", output);
+    }
+
+    [Fact]
+    public void Print_EndNoNewline()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print("hello", end="")
+                print(" world")
+            """);
+        Assert.Equal("hello world", output);
+    }
+
+    [Fact]
+    public void Print_CustomSepAndEnd()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print("a", "b", sep="-", end="!")
+            """);
+        Assert.Equal("a-b!", output);
+    }
+
+    [Fact]
+    public void Print_NoArgs_EmptyLine()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print()
+            """);
+        Assert.Equal("", output);
+    }
+
+    [Fact]
+    public void Print_IntegerArgs()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(1, 2, 3)
+            """);
+        Assert.Equal("1 2 3", output);
+    }
 }

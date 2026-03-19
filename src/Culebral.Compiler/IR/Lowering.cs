@@ -58,6 +58,11 @@ public sealed class IrLowering
         var module = new IrModule { Name = moduleName, SourcePath = sourcePath };
         _module = module;
 
+        // Register built-in Result/Ok/Err types
+        _knownTypes.Add("Result");
+        _knownTypes.Add("Ok");
+        _knownTypes.Add("Err");
+
         // Collect known type and function names
         foreach (var node in unit.Statements)
         {
@@ -106,6 +111,9 @@ public sealed class IrLowering
                 }
             }
         }
+
+        // Inject built-in Result/Ok/Err types if referenced
+        InjectResultTypes(module);
 
         // Inject default interface method implementations into classes that don't override them
         InjectDefaultInterfaceMethods(module);
@@ -454,6 +462,209 @@ public sealed class IrLowering
         }
 
         return typeDef;
+    }
+
+    /// <summary>
+    /// Injects the built-in Result/Ok/Err type hierarchy into the module.
+    /// Result is an abstract base class; Ok and Err are sealed subclasses.
+    /// Each stores a value (object) and exposes is_ok, is_err, and value properties.
+    /// </summary>
+    private void InjectResultTypes(IrModule module)
+    {
+        // Don't inject if user already defined these types
+        if (_typeDefs.ContainsKey("Result")) return;
+
+        var dummySpan = SourceSpan.None;
+
+        // --- Abstract base: Result ---
+        var resultDef = new IrTypeDef
+        {
+            Name = "Result",
+            Kind = IrTypeKind.AbstractClass,
+        };
+        resultDef.Fields.Add(new IrField { Name = "value", Type = PrimitiveType.Object });
+
+        // Virtual properties on the base class — overridden by Ok and Err.
+        // These dummy bodies return default values; they're dispatched via callvirt at runtime.
+        var resultIsOkGetter = CreateBoolGetterBody(false, dummySpan);
+        resultDef.Properties.Add(new IrProperty
+        {
+            Name = "is_ok",
+            Type = PrimitiveType.Bool,
+            Getter = new IrFunction
+            {
+                Name = "get_is_ok", ReturnType = PrimitiveType.Bool,
+                Parameters = [], Body = [resultIsOkGetter], IsStatic = false, DeclaringType = "Result",
+            },
+        });
+        var resultIsErrGetter = CreateBoolGetterBody(false, dummySpan);
+        resultDef.Properties.Add(new IrProperty
+        {
+            Name = "is_err",
+            Type = PrimitiveType.Bool,
+            Getter = new IrFunction
+            {
+                Name = "get_is_err", ReturnType = PrimitiveType.Bool,
+                Parameters = [], Body = [resultIsErrGetter], IsStatic = false, DeclaringType = "Result",
+            },
+        });
+        var resultValueGetter = CreateFieldGetterBody("Result", "value", dummySpan);
+        resultDef.Properties.Add(new IrProperty
+        {
+            Name = "value",
+            Type = PrimitiveType.Object,
+            Getter = new IrFunction
+            {
+                Name = "get_value", ReturnType = PrimitiveType.Object,
+                Parameters = [], Body = [resultValueGetter], IsStatic = false, DeclaringType = "Result",
+            },
+        });
+
+        module.Types.Insert(0, resultDef);
+        _typeDefs["Result"] = resultDef;
+
+        // --- Sealed: Ok : Result ---
+        var okDef = new IrTypeDef
+        {
+            Name = "Ok",
+            Kind = IrTypeKind.SealedClass,
+            BaseType = "Result",
+        };
+        okDef.Fields.Add(new IrField { Name = "value", Type = PrimitiveType.Object });
+
+        // Constructor: Ok(value)
+        var okCtorBody = new IrBasicBlock { Label = "entry" };
+        okCtorBody.Emit(new IrLoadThis(dummySpan));       // this
+        okCtorBody.Emit(new IrLoadArg(1, dummySpan));     // value param (arg 0 = this, arg 1 = first param)
+        okCtorBody.Emit(new IrStoreField("Ok", "value", dummySpan));
+        okCtorBody.Emit(new IrReturn(false, dummySpan));
+        okDef.Constructor = new IrFunction
+        {
+            Name = ".ctor",
+            ReturnType = PrimitiveType.Void,
+            Parameters = [new IrParameter { Name = "value", Type = PrimitiveType.Object, Index = 1 }],
+            Body = [okCtorBody],
+            IsStatic = false,
+            DeclaringType = "Ok",
+        };
+
+        // Properties: is_ok (true), is_err (false), value (field)
+        var okIsOkGetter = CreateBoolGetterBody(true, dummySpan);
+        okDef.Properties.Add(new IrProperty
+        {
+            Name = "is_ok",
+            Type = PrimitiveType.Bool,
+            Getter = new IrFunction
+            {
+                Name = "get_is_ok", ReturnType = PrimitiveType.Bool,
+                Parameters = [], Body = [okIsOkGetter], IsStatic = false, DeclaringType = "Ok",
+            },
+        });
+        var okIsErrGetter = CreateBoolGetterBody(false, dummySpan);
+        okDef.Properties.Add(new IrProperty
+        {
+            Name = "is_err",
+            Type = PrimitiveType.Bool,
+            Getter = new IrFunction
+            {
+                Name = "get_is_err", ReturnType = PrimitiveType.Bool,
+                Parameters = [], Body = [okIsErrGetter], IsStatic = false, DeclaringType = "Ok",
+            },
+        });
+        var okValueGetter = CreateFieldGetterBody("Ok", "value", dummySpan);
+        okDef.Properties.Add(new IrProperty
+        {
+            Name = "value",
+            Type = PrimitiveType.Object,
+            Getter = new IrFunction
+            {
+                Name = "get_value", ReturnType = PrimitiveType.Object,
+                Parameters = [], Body = [okValueGetter], IsStatic = false, DeclaringType = "Ok",
+            },
+        });
+
+        module.Types.Insert(1, okDef);
+        _typeDefs["Ok"] = okDef;
+
+        // --- Sealed: Err : Result ---
+        var errDef = new IrTypeDef
+        {
+            Name = "Err",
+            Kind = IrTypeKind.SealedClass,
+            BaseType = "Result",
+        };
+        errDef.Fields.Add(new IrField { Name = "value", Type = PrimitiveType.Object });
+
+        // Constructor: Err(value)
+        var errCtorBody = new IrBasicBlock { Label = "entry" };
+        errCtorBody.Emit(new IrLoadThis(dummySpan));       // this
+        errCtorBody.Emit(new IrLoadArg(1, dummySpan));     // value param (arg 0 = this, arg 1 = first param)
+        errCtorBody.Emit(new IrStoreField("Err", "value", dummySpan));
+        errCtorBody.Emit(new IrReturn(false, dummySpan));
+        errDef.Constructor = new IrFunction
+        {
+            Name = ".ctor",
+            ReturnType = PrimitiveType.Void,
+            Parameters = [new IrParameter { Name = "value", Type = PrimitiveType.Object, Index = 1 }],
+            Body = [errCtorBody],
+            IsStatic = false,
+            DeclaringType = "Err",
+        };
+
+        // Properties: is_ok (false), is_err (true), value (field)
+        var errIsOkGetter = CreateBoolGetterBody(false, dummySpan);
+        errDef.Properties.Add(new IrProperty
+        {
+            Name = "is_ok",
+            Type = PrimitiveType.Bool,
+            Getter = new IrFunction
+            {
+                Name = "get_is_ok", ReturnType = PrimitiveType.Bool,
+                Parameters = [], Body = [errIsOkGetter], IsStatic = false, DeclaringType = "Err",
+            },
+        });
+        var errIsErrGetter = CreateBoolGetterBody(true, dummySpan);
+        errDef.Properties.Add(new IrProperty
+        {
+            Name = "is_err",
+            Type = PrimitiveType.Bool,
+            Getter = new IrFunction
+            {
+                Name = "get_is_err", ReturnType = PrimitiveType.Bool,
+                Parameters = [], Body = [errIsErrGetter], IsStatic = false, DeclaringType = "Err",
+            },
+        });
+        var errValueGetter = CreateFieldGetterBody("Err", "value", dummySpan);
+        errDef.Properties.Add(new IrProperty
+        {
+            Name = "value",
+            Type = PrimitiveType.Object,
+            Getter = new IrFunction
+            {
+                Name = "get_value", ReturnType = PrimitiveType.Object,
+                Parameters = [], Body = [errValueGetter], IsStatic = false, DeclaringType = "Err",
+            },
+        });
+
+        module.Types.Insert(2, errDef);
+        _typeDefs["Err"] = errDef;
+    }
+
+    private static IrBasicBlock CreateBoolGetterBody(bool value, SourceSpan span)
+    {
+        var block = new IrBasicBlock { Label = "entry" };
+        block.Emit(new IrLoadBool(value, span));
+        block.Emit(new IrReturn(true, span));
+        return block;
+    }
+
+    private static IrBasicBlock CreateFieldGetterBody(string typeName, string fieldName, SourceSpan span)
+    {
+        var block = new IrBasicBlock { Label = "entry" };
+        block.Emit(new IrLoadThis(span));
+        block.Emit(new IrLoadField(typeName, fieldName, span));
+        block.Emit(new IrReturn(true, span));
+        return block;
     }
 
     /// <summary>
@@ -1651,9 +1862,54 @@ public sealed class IrLowering
         // Handle built-in functions and constructor calls
         if (call.Callee is IdentifierExpr ident)
         {
+            // Special handling for print() — supports multiple args and named parameters
+            if (ident.Name == "print")
+            {
+                string? sep = null;
+                string? end = null;
+                bool flush = false;
+                bool useStderr = false;
+
+                // Separate positional and named arguments
+                var positionalArgs = new List<Argument>();
+                foreach (var arg in call.Arguments)
+                {
+                    if (arg.Name is null)
+                    {
+                        positionalArgs.Add(arg);
+                    }
+                    else
+                    {
+                        switch (arg.Name)
+                        {
+                            case "sep":
+                                if (arg.Value is StringLiteralExpr sepLit) sep = sepLit.Value;
+                                break;
+                            case "end":
+                                if (arg.Value is StringLiteralExpr endLit) end = endLit.Value;
+                                break;
+                            case "flush":
+                                if (arg.Value is BoolLiteralExpr flushLit) flush = flushLit.Value;
+                                break;
+                            case "file":
+                                if (arg.Value is IdentifierExpr fileIdent && fileIdent.Name == "stderr")
+                                    useStderr = true;
+                                break;
+                        }
+                    }
+                }
+
+                // Lower positional arguments onto the stack
+                foreach (var arg in positionalArgs)
+                    LowerExpression(arg.Value);
+
+                _currentBlock.Emit(new IrPrint(positionalArgs.Count, sep, end, flush, useStderr, call.Span));
+                return;
+            }
+
             var builtins = new HashSet<string>
             {
-                "print", "len", "range", "int", "float", "str", "bool",
+                "len", "range", "int", "float", "str", "bool",
                 "sorted", "abs", "min", "max", "type", "isinstance",
                 "enumerate", "zip", "map", "filter", "open",
                 "input", "round", "chr", "ord",
@@ -2641,7 +2897,8 @@ public sealed class IrLowering
     {
         return instr switch
         {
-            IrCallBuiltin { Name: "print" } => false, // void
+            IrPrint => false, // void
+            IrCallBuiltin { Name: "print" } => false, // void (legacy, shouldn't occur)
             IrCallBuiltin => true,
             IrCall => true, // conservative — may be void but safer to pop
             IrCallMethod => true,

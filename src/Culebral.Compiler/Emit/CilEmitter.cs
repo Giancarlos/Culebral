@@ -511,9 +511,17 @@ public sealed class CilEmitter
 
         if (prop.Getter is not null)
         {
+            var getterAttrs = MethodAttributes.Public | MethodAttributes.SpecialName | MethodAttributes.HideBySig;
+            // Make property getters virtual on abstract classes (for polymorphic dispatch)
+            if (typeDef.Kind == IrTypeKind.AbstractClass)
+                getterAttrs |= MethodAttributes.Virtual | MethodAttributes.NewSlot;
+            // Make property getters virtual overrides on sealed subclasses that inherit from a base type
+            else if (typeDef.Kind == IrTypeKind.SealedClass && typeDef.BaseType is not null
+                     && _typeBuilders.ContainsKey(typeDef.BaseType))
+                getterAttrs |= MethodAttributes.Virtual;
+
             var getterMb = tb.DefineMethod($"get_{prop.Name}",
-                MethodAttributes.Public | MethodAttributes.SpecialName | MethodAttributes.HideBySig,
-                clrType, Type.EmptyTypes);
+                getterAttrs, clrType, Type.EmptyTypes);
             _methodBuilders[$"{typeDef.Name}.get_{prop.Name}"] = getterMb;
             var il = getterMb.GetILGenerator();
             EmitFunctionBody(il, prop.Getter);
@@ -522,9 +530,15 @@ public sealed class CilEmitter
 
         if (prop.Setter is not null)
         {
+            var setterAttrs = MethodAttributes.Public | MethodAttributes.SpecialName | MethodAttributes.HideBySig;
+            if (typeDef.Kind == IrTypeKind.AbstractClass)
+                setterAttrs |= MethodAttributes.Virtual | MethodAttributes.NewSlot;
+            else if (typeDef.Kind == IrTypeKind.SealedClass && typeDef.BaseType is not null
+                     && _typeBuilders.ContainsKey(typeDef.BaseType))
+                setterAttrs |= MethodAttributes.Virtual;
+
             var setterMb = tb.DefineMethod($"set_{prop.Name}",
-                MethodAttributes.Public | MethodAttributes.SpecialName | MethodAttributes.HideBySig,
-                typeof(void), [clrType]);
+                setterAttrs, typeof(void), [clrType]);
             setterMb.DefineParameter(1, ParameterAttributes.None, "value");
             _methodBuilders[$"{typeDef.Name}.set_{prop.Name}"] = setterMb;
             var il = setterMb.GetILGenerator();
@@ -818,6 +832,10 @@ public sealed class CilEmitter
                     // yield outside generator — just pop the value
                     il.Emit(OpCodes.Pop);
                 }
+                break;
+
+            case IrPrint printInstr:
+                EmitPrint(il, printInstr, func, locals);
                 break;
 
             case IrCallBuiltin callBuiltin:
@@ -1269,6 +1287,188 @@ public sealed class CilEmitter
                 il.Emit(OpCodes.Ldc_I4_0);
                 il.Emit(OpCodes.Ceq);
                 break;
+        }
+    }
+
+    private void EmitPrint(ILGenerator il, IrPrint print, IrFunction func, LocalBuilder[] locals)
+    {
+        var argc = print.PositionalArgCount;
+        var sep = print.Sep;
+        var end = print.End;
+        var flush = print.Flush;
+        var useStderr = print.UseStderr;
+
+        // ── Fast path: single arg, default sep/end, no flush, stdout ──
+        if (argc == 1 && sep is null && end is null && !flush && !useStderr)
+        {
+            var stackType = InferStackTopType(print, func);
+            if (stackType == typeof(int))
+                il.Emit(OpCodes.Call, typeof(Console).GetMethod("WriteLine", [typeof(int)])!);
+            else if (stackType == typeof(double))
+                il.Emit(OpCodes.Call, typeof(Console).GetMethod("WriteLine", [typeof(double)])!);
+            else if (stackType == typeof(string))
+                il.Emit(OpCodes.Call, typeof(Console).GetMethod("WriteLine", [typeof(string)])!);
+            else if (stackType == typeof(bool))
+                il.Emit(OpCodes.Call, typeof(Console).GetMethod("WriteLine", [typeof(bool)])!);
+            else
+                il.Emit(OpCodes.Call, typeof(Console).GetMethod("WriteLine", [typeof(object)])!);
+            return;
+        }
+
+        // ── No-args: just print newline (or custom end) ──
+        if (argc == 0)
+        {
+            if (useStderr)
+                il.Emit(OpCodes.Call, typeof(Console).GetProperty("Error")!.GetGetMethod()!);
+
+            var effectiveEnd = end ?? "\n";
+            if (effectiveEnd == "\n")
+            {
+                if (useStderr)
+                    il.Emit(OpCodes.Callvirt, typeof(System.IO.TextWriter).GetMethod("WriteLine", Type.EmptyTypes)!);
+                else
+                    il.Emit(OpCodes.Call, typeof(Console).GetMethod("WriteLine", Type.EmptyTypes)!);
+            }
+            else
+            {
+                il.Emit(OpCodes.Ldstr, effectiveEnd);
+                if (useStderr)
+                    il.Emit(OpCodes.Callvirt, typeof(System.IO.TextWriter).GetMethod("Write", [typeof(string)])!);
+                else
+                    il.Emit(OpCodes.Call, typeof(Console).GetMethod("Write", [typeof(string)])!);
+            }
+
+            if (flush)
+            {
+                if (useStderr)
+                {
+                    il.Emit(OpCodes.Call, typeof(Console).GetProperty("Error")!.GetGetMethod()!);
+                    il.Emit(OpCodes.Callvirt, typeof(System.IO.TextWriter).GetMethod("Flush")!);
+                }
+                else
+                {
+                    il.Emit(OpCodes.Call, typeof(Console).GetProperty("Out")!.GetGetMethod()!);
+                    il.Emit(OpCodes.Callvirt, typeof(System.IO.TextWriter).GetMethod("Flush")!);
+                }
+            }
+            return;
+        }
+
+        // ── General case: multiple args or named args ──
+        // Stack currently has [arg0, arg1, ..., argN-1] (N = argc)
+        // We need to collect them into a string[] by calling ToString on each.
+
+        // Create a local object[] to hold the args (they're already on the stack)
+        var arrLocal = il.DeclareLocal(typeof(object[]));
+        // We need to store them in reverse order since they're on the stack
+        il.Emit(OpCodes.Ldc_I4, argc);
+        il.Emit(OpCodes.Newarr, typeof(object));
+        il.Emit(OpCodes.Stloc, arrLocal);
+
+        // The values are on the stack in order: arg0 is deepest, argN-1 is on top.
+        // We need to pop them in reverse order (top first = last arg).
+        // Use temp locals to hold them, then store into the array.
+        var tempLocals = new LocalBuilder[argc];
+        for (int i = 0; i < argc; i++)
+            tempLocals[i] = il.DeclareLocal(typeof(object));
+
+        // Pop from stack into temps (reverse order)
+        for (int i = argc - 1; i >= 0; i--)
+        {
+            // Box value types before storing to object local
+            var argType = InferNthArgType(print, func, i, argc);
+            if (argType.IsValueType)
+                il.Emit(OpCodes.Box, argType);
+            il.Emit(OpCodes.Stloc, tempLocals[i]);
+        }
+
+        // Store temps into the array in forward order
+        for (int i = 0; i < argc; i++)
+        {
+            il.Emit(OpCodes.Ldloc, arrLocal);
+            il.Emit(OpCodes.Ldc_I4, i);
+            il.Emit(OpCodes.Ldloc, tempLocals[i]);
+            il.Emit(OpCodes.Stelem_Ref);
+        }
+
+        // Convert each element to string: create string[] and fill with ToString calls
+        var strArrLocal = il.DeclareLocal(typeof(string[]));
+        il.Emit(OpCodes.Ldc_I4, argc);
+        il.Emit(OpCodes.Newarr, typeof(string));
+        il.Emit(OpCodes.Stloc, strArrLocal);
+
+        for (int i = 0; i < argc; i++)
+        {
+            il.Emit(OpCodes.Ldloc, strArrLocal);
+            il.Emit(OpCodes.Ldc_I4, i);
+            // Load from object array, call ToString
+            il.Emit(OpCodes.Ldloc, arrLocal);
+            il.Emit(OpCodes.Ldc_I4, i);
+            il.Emit(OpCodes.Ldelem_Ref);
+            // Python prints "True"/"False" for bools — handle via object.ToString()
+            il.Emit(OpCodes.Callvirt, typeof(object).GetMethod("ToString", Type.EmptyTypes)!);
+            il.Emit(OpCodes.Stelem_Ref);
+        }
+
+        // String.Join(sep, stringArray)
+        il.Emit(OpCodes.Ldstr, sep ?? " ");
+        il.Emit(OpCodes.Ldloc, strArrLocal);
+        il.Emit(OpCodes.Call, typeof(string).GetMethod("Join", [typeof(string), typeof(string[])])!);
+
+        // Now the joined string is on the stack.
+        // Determine writer and write.
+        var effectiveEndGeneral = end ?? "\n";
+
+        if (useStderr)
+        {
+            // Store joined string, get writer, load string, write
+            var joinedLocal = il.DeclareLocal(typeof(string));
+            il.Emit(OpCodes.Stloc, joinedLocal);
+            il.Emit(OpCodes.Call, typeof(Console).GetProperty("Error")!.GetGetMethod()!);
+            il.Emit(OpCodes.Ldloc, joinedLocal);
+
+            if (effectiveEndGeneral == "\n")
+            {
+                il.Emit(OpCodes.Callvirt, typeof(System.IO.TextWriter).GetMethod("WriteLine", [typeof(string)])!);
+            }
+            else if (effectiveEndGeneral == "")
+            {
+                il.Emit(OpCodes.Callvirt, typeof(System.IO.TextWriter).GetMethod("Write", [typeof(string)])!);
+            }
+            else
+            {
+                il.Emit(OpCodes.Callvirt, typeof(System.IO.TextWriter).GetMethod("Write", [typeof(string)])!);
+                il.Emit(OpCodes.Call, typeof(Console).GetProperty("Error")!.GetGetMethod()!);
+                il.Emit(OpCodes.Ldstr, effectiveEndGeneral);
+                il.Emit(OpCodes.Callvirt, typeof(System.IO.TextWriter).GetMethod("Write", [typeof(string)])!);
+            }
+        }
+        else
+        {
+            // stdout path
+            if (effectiveEndGeneral == "\n")
+            {
+                il.Emit(OpCodes.Call, typeof(Console).GetMethod("WriteLine", [typeof(string)])!);
+            }
+            else if (effectiveEndGeneral == "")
+            {
+                il.Emit(OpCodes.Call, typeof(Console).GetMethod("Write", [typeof(string)])!);
+            }
+            else
+            {
+                il.Emit(OpCodes.Call, typeof(Console).GetMethod("Write", [typeof(string)])!);
+                il.Emit(OpCodes.Ldstr, effectiveEndGeneral);
+                il.Emit(OpCodes.Call, typeof(Console).GetMethod("Write", [typeof(string)])!);
+            }
+        }
+
+        if (flush)
+        {
+            if (useStderr)
+                il.Emit(OpCodes.Call, typeof(Console).GetProperty("Error")!.GetGetMethod()!);
+            else
+                il.Emit(OpCodes.Call, typeof(Console).GetProperty("Out")!.GetGetMethod()!);
+            il.Emit(OpCodes.Callvirt, typeof(System.IO.TextWriter).GetMethod("Flush")!);
         }
     }
 

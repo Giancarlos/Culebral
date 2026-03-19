@@ -113,6 +113,16 @@ public static class BuiltinSymbols
         DeclareFunction(scope, "map", [PrimitiveType.Object, PrimitiveType.Object], PrimitiveType.Object);
         DeclareFunction(scope, "filter", [PrimitiveType.Object, PrimitiveType.Object], PrimitiveType.Object);
 
+        // Built-in Result type and Ok/Err constructors
+        var resultType = new ClassType("Result", "Result");
+        var okType = new ClassType("Ok", "Ok");
+        var errType = new ClassType("Err", "Err");
+        DeclareType(scope, "Result", resultType);
+        DeclareType(scope, "Ok", okType);
+        DeclareType(scope, "Err", errType);
+        DeclareFunction(scope, "Ok", [PrimitiveType.Object], okType);
+        DeclareFunction(scope, "Err", [PrimitiveType.Object], errType);
+
         return scope;
     }
 

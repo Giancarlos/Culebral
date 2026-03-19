@@ -8,7 +8,7 @@
   <br><br>
   <img src="https://img.shields.io/badge/.NET-10.0-512BD4?style=flat" alt=".NET 10">
   <img src="https://img.shields.io/badge/C%23-14-239120?style=flat" alt="C# 14">
-  <img src="https://img.shields.io/badge/tests-212%20passing-22863a?style=flat" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-215%20passing-22863a?style=flat" alt="Tests">
   <img src="https://img.shields.io/badge/phase-4%20complete-22863a?style=flat" alt="Phase 4">
 </p>
 
@@ -307,7 +307,7 @@ dotnet run --project src/Culebral.Compiler -- ir samples/fibonacci.cbl
 | **2** | Type system + classes — generics, constructors, interfaces, `@field` | Next |
 | **3** | .NET interop — BCL imports, case bridging, NuGet resolution | Planned |
 | **4** | Language completeness — async/await, pattern matching, records, null safety | Planned |
-| **5** | Standard library — `culebral.result`, `culebral.io`, thin BCL wrappers | When needed |
+| **5** | Standard library — `Result` type (built-in), `culebral.testing` | Minimal — .NET interop is the stdlib |
 | **6** | Native modules — LLVM backend for `@native` hot paths | Future |
 
 ## License

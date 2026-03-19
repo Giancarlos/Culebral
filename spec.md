@@ -555,60 +555,37 @@ Valid targets: `"net"` (primary, default), `"native"` (future LLVM backend). Use
 
 ## Standard Library (`culebral.*`)
 
-The `culebral.*` namespace is reserved for the standard library. On .NET, these are thin wrappers over BCL types — typically one-liners. The standard library is written in Culebral itself and ships with the compiler.
+Culebral's standard library is deliberately minimal. .NET interop with automatic case bridging (`snake_case` in Culebral maps to `PascalCase` in .NET) means the entire BCL and NuGet ecosystem is directly usable without wrappers. There is no need for `culebral.io`, `culebral.collections`, `culebral.json`, etc. — users import `System.IO`, `System.Collections.Generic`, `System.Text.Json` directly and call them with Pythonic naming conventions.
+
+The `culebral.*` namespace is reserved for the few things .NET does not already provide.
+
+### Built-in Types
+
+**`Result`** — A built-in algebraic type for error handling without exceptions. `Ok(value)` and `Err(value)` are constructors available in all Culebral programs without imports.
+
+```python
+def divide(a: int, b: int) -> Result:
+    if b == 0:
+        return Err("division by zero")
+    return Ok(a // b)
+
+r = divide(10, 2)
+print(r.is_ok)   # True
+print(r.value)    # 5
+print(r.is_err)   # False
+```
+
+Properties: `is_ok` (bool), `is_err` (bool), `value` (the wrapped value).
 
 ### Module Resolution
 
 Import resolution follows a search path: project source → `lib/` directory → standard library path. `culebral.*` imports resolve to `.cbl` files on disk. .NET imports (anything else like `System.*`, `Microsoft.*`, NuGet packages) resolve against .NET assembly metadata.
 
-### Philosophy
+### Future Modules
 
-The standard library is **not** a priority. For the .NET target, users have direct access to the entire BCL and NuGet ecosystem — the standard library only exists where a Pythonic wrapper meaningfully improves ergonomics. It should emerge from real pain points, not be designed upfront.
-
-### Example Modules (Illustrative, Not Implemented)
-
-```python
-# culebral/collections/hashmap.cbl
-when target == "net":
-    from System.Collections.Generic import Dictionary
-    type HashMap[K, V] = Dictionary[K, V]
-```
-
-```python
-# culebral/io/file.cbl
-when target == "net":
-    from System.IO import File as _File
-
-    def read_text(path: str) -> str:
-        return _File.read_all_text(path)
-
-    def write_text(path: str, content: str):
-        _File.write_all_text(path, content)
-```
-
-```python
-# culebral/http/client.cbl
-when target == "net":
-    from System.Net.Http import HttpClient as _Client
-
-    async def get(url: str) -> str:
-        client = _Client()
-        response = await client.get_async(url)
-        return await response.content.read_as_string_async()
-```
-
-### Planned Modules
-
-| Module | Wraps (.NET) | Priority |
+| Module | Purpose | Priority |
 |---|---|---|
-| `culebral.io` | `System.IO` | When needed |
-| `culebral.collections` | `System.Collections.Generic` | When needed |
-| `culebral.math` | `System.Math` | When needed |
-| `culebral.json` | `System.Text.Json` | When needed |
-| `culebral.http` | `System.Net.Http` | When needed |
-| `culebral.async` | `System.Threading.Tasks` | When needed |
-| `culebral.testing` | Custom test runner | When needed |
-| `culebral.result` | Custom `Result[T, E]` type | Early — used in examples |
+| `culebral.testing` | Built-in test runner for `culebral test` | When `culebral test` is implemented |
 
 ---
 
@@ -885,11 +862,10 @@ Phase 4 is broken into sub-phases ordered by dependency and impact. Features in 
 - `culebral fmt` (formatter)
 - `culebral test` (built-in test runner)
 
-**Phase 5 — Standard Library (when needed)**
-- `culebral.result` (Result type, likely needed early)
-- `culebral.io`, `culebral.collections`, etc. as pain points emerge
-- Written in Culebral, thin wrappers over BCL
-- Builds incrementally, no big upfront design
+**Phase 5 — Standard Library (minimal)**
+- `Result` type: built-in (already implemented)
+- `culebral.testing`: test runner for `culebral test` (when needed)
+- No BCL wrappers needed — .NET interop with case bridging is the standard library
 
 **Phase 6 — Native Modules (LOWEST PRIORITY)**
 
