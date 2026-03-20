@@ -3245,4 +3245,88 @@ public class EmitTests : IDisposable
             """);
         Assert.Equal("effect\ndone", output);
     }
+
+    // ─── Null Safety / Flow Typing ───
+
+    [Fact]
+    public void NullableNarrowing_EarlyReturn_CompilesAndRuns()
+    {
+        var output = CompileAndRun("""
+            def greet(name: str?) -> str:
+                if name is None:
+                    return "Hello, stranger!"
+                return f"Hello, {name}!"
+
+            def main():
+                print(greet("Alice"))
+                print(greet(None))
+            """);
+        Assert.Equal("Hello, Alice!\nHello, stranger!", output);
+    }
+
+    // ─── Dict Merge Operator ───
+
+    [Fact]
+    public void DictMerge_PipeOperator()
+    {
+        var output = CompileAndRun("""
+            def main():
+                d1 = {"a": 1, "b": 2}
+                d2 = {"b": 3, "c": 4}
+                d3 = d1 | d2
+                print(len(d3))
+            """);
+        Assert.Equal("3", output);
+    }
+
+    [Fact]
+    public void DictMerge_RightWinsOnConflict()
+    {
+        var output = CompileAndRun("""
+            def main():
+                d1 = {"a": 1, "b": 2}
+                d2 = {"a": 99}
+                d3 = d1 | d2
+                print(len(d3))
+            """);
+        // d3 has keys "a" (from d2, overwritten), "b" (from d1) → 2 entries
+        Assert.Equal("2", output);
+    }
+
+    // ─── Negative Exponent Float Promotion ───
+
+    [Fact]
+    public void Power_NegativeExponent_ReturnsFloat()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(2 ** -1)
+            """);
+        Assert.Equal("0.5", output);
+    }
+
+    [Fact]
+    public void Power_PositiveExponent_ReturnsFloat()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(2 ** 3)
+            """);
+        Assert.Equal("8", output);
+    }
+
+    // ─── Multi-Type Generic Arguments ───
+
+    [Fact]
+    public void GenericType_MultiTypeArgs_DictionaryStrInt()
+    {
+        var output = CompileAndRun("""
+            from System.Collections.Generic import Dictionary
+            def main():
+                d = Dictionary[str, int]()
+                x = d is not None
+                print(x)
+            """);
+        Assert.Equal("True", output);
+    }
 }

@@ -1368,6 +1368,19 @@ public sealed class CulebralParser
             return new SliceExpr(obj, lower, upper, step, new SourceSpan(start, end));
         }
 
+        // Multi-type generic arguments: Dict[str, int], Tuple[int, str], etc.
+        if (Current.Kind == TokenKind.Comma && lower is not null)
+        {
+            var elements = new List<Expression> { lower };
+            while (TryConsume(TokenKind.Comma))
+            {
+                elements.Add(ParseExpression());
+            }
+            var endMulti = Expect(TokenKind.RightBracket).Span.End;
+            var tupleIndex = new TupleExpr(elements, new SourceSpan(lower.Span.Start, endMulti));
+            return new IndexExpr(obj, tupleIndex, new SourceSpan(start, endMulti));
+        }
+
         var endTok = Expect(TokenKind.RightBracket).Span.End;
         return new IndexExpr(obj, lower!, new SourceSpan(start, endTok));
     }

@@ -59,6 +59,25 @@ public sealed class DotNetTypeResolver
             }
         }
 
+        // Try generic type with arity suffixes (e.g., Dictionary → Dictionary`2)
+        if (type is null && !fullName.Contains('`'))
+        {
+            for (var arity = 1; arity <= 8; arity++)
+            {
+                var genericName = $"{fullName}`{arity}";
+                type = Type.GetType(genericName);
+                if (type is null)
+                {
+                    foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        type = assembly.GetType(genericName);
+                        if (type is not null) break;
+                    }
+                }
+                if (type is not null) break;
+            }
+        }
+
         if (type is not null)
             _typeCache[fullName] = type;
 

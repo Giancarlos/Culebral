@@ -1208,6 +1208,58 @@ public sealed class CilEmitter
                 break;
             }
 
+            // ─── Dict merge ───
+
+            case IrDictMerge:
+            {
+                // Stack: [left_dict (Dictionary<object,object>), right_dict (Dictionary<object,object>)]
+                // → new Dictionary<object,object>(left_dict), then foreach entry in right_dict: set key
+                var dictType = typeof(Dictionary<object, object>);
+                var rightDictTemp = il.DeclareLocal(dictType);
+                il.Emit(OpCodes.Castclass, dictType);
+                il.Emit(OpCodes.Stloc, rightDictTemp);
+                il.Emit(OpCodes.Castclass, typeof(System.Collections.Generic.IDictionary<object, object>));
+                il.Emit(OpCodes.Newobj, dictType.GetConstructor([typeof(System.Collections.Generic.IDictionary<object, object>)])!);
+                // Now iterate right_dict and set each key
+                // Use a helper: foreach (var kvp in right) result[kvp.Key] = kvp.Value;
+                var kvpType = typeof(KeyValuePair<object, object>);
+                var enumeratorType = typeof(Dictionary<object, object>.Enumerator);
+                var resultTemp = il.DeclareLocal(dictType);
+                il.Emit(OpCodes.Stloc, resultTemp);
+                // Get enumerator from right dict
+                var enumeratorTemp = il.DeclareLocal(enumeratorType);
+                il.Emit(OpCodes.Ldloc, rightDictTemp);
+                il.Emit(OpCodes.Callvirt, dictType.GetMethod("GetEnumerator")!);
+                il.Emit(OpCodes.Stloc, enumeratorTemp);
+                // Loop
+                var loopStart = il.DefineLabel();
+                var loopEnd = il.DefineLabel();
+                il.MarkLabel(loopStart);
+                il.Emit(OpCodes.Ldloca, enumeratorTemp);
+                il.Emit(OpCodes.Call, enumeratorType.GetMethod("MoveNext")!);
+                il.Emit(OpCodes.Brfalse, loopEnd);
+                // Get current KVP
+                il.Emit(OpCodes.Ldloc, resultTemp);
+                il.Emit(OpCodes.Ldloca, enumeratorTemp);
+                il.Emit(OpCodes.Call, enumeratorType.GetProperty("Current")!.GetGetMethod()!);
+                var kvpTemp = il.DeclareLocal(kvpType);
+                il.Emit(OpCodes.Stloc, kvpTemp);
+                il.Emit(OpCodes.Ldloca, kvpTemp);
+                il.Emit(OpCodes.Call, kvpType.GetProperty("Key")!.GetGetMethod()!);
+                il.Emit(OpCodes.Ldloca, kvpTemp);
+                il.Emit(OpCodes.Call, kvpType.GetProperty("Value")!.GetGetMethod()!);
+                il.Emit(OpCodes.Callvirt, dictType.GetMethod("set_Item")!);
+                il.Emit(OpCodes.Br, loopStart);
+                il.MarkLabel(loopEnd);
+                // Dispose enumerator
+                il.Emit(OpCodes.Ldloca, enumeratorTemp);
+                il.Emit(OpCodes.Constrained, enumeratorType);
+                il.Emit(OpCodes.Callvirt, typeof(IDisposable).GetMethod("Dispose")!);
+                // Push result
+                il.Emit(OpCodes.Ldloc, resultTemp);
+                break;
+            }
+
             // ─── List repetition ───
 
             case IrListRepeat:
@@ -3550,6 +3602,7 @@ public sealed class CilEmitter
             IrSlice => typeof(object),
             IrNewArrayFromStack => typeof(object[]),
             IrListConcat => typeof(List<object>),
+            IrDictMerge => typeof(Dictionary<object, object>),
             IrListRepeat => typeof(List<object>),
             IrStringRepeat => typeof(string),
             _ => typeof(object),

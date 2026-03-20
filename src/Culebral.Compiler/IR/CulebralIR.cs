@@ -230,6 +230,8 @@ public sealed record IrAwait(bool HasResult, SourceSpan Span) : IrInstruction(Sp
 // Collection / string operators
 /// <summary>List concatenation: stack [left_list, right_list] → new list with all elements.</summary>
 public sealed record IrListConcat(SourceSpan Span) : IrInstruction(Span);
+/// <summary>Dict merge: stack [left_dict, right_dict] → new dict with entries from both (right wins on conflicts).</summary>
+public sealed record IrDictMerge(SourceSpan Span) : IrInstruction(Span);
 /// <summary>List repetition: stack [list, int_count] → new list with elements repeated count times.</summary>
 public sealed record IrListRepeat(SourceSpan Span) : IrInstruction(Span);
 /// <summary>String repetition: stack [string, int_count] → repeated string.</summary>

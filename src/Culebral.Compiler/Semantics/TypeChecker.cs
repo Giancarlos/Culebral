@@ -18,6 +18,14 @@ public sealed class TypeChecker
     private readonly DotNetTypeResolver _dotNetResolver = new();
 
     /// <summary>
+    /// Flow-sensitive type narrowing. When an <c>if x is None: return</c> guard narrows
+    /// a nullable variable, the narrowed (non-null) type is stored here and consulted
+    /// during identifier resolution. Entries are added/removed as the checker walks
+    /// control flow — they are scoped and temporary.
+    /// </summary>
+    private readonly Dictionary<string, CulebralType> _narrowedTypes = new();
+
+    /// <summary>
     /// Tracks generic type parameter constraints for user-defined types.
     /// Key: "TypeName.ParamName", Value: constraint type (interface or class).
     /// </summary>
@@ -217,9 +225,14 @@ public sealed class TypeChecker
         }
 
         var prevScope = _currentScope;
+        var prevNarrowings = new Dictionary<string, CulebralType>(_narrowedTypes);
         _currentScope = funcScope;
         CheckBlock(func.Body);
         _currentScope = prevScope;
+        // Restore narrowings — function body narrowings should not leak out
+        _narrowedTypes.Clear();
+        foreach (var kv in prevNarrowings)
+            _narrowedTypes[kv.Key] = kv.Value;
     }
 
     private void CheckClass(ClassDef cls)
@@ -409,15 +422,7 @@ public sealed class TypeChecker
                 break;
 
             case IfStatement ifStmt:
-                InferType(ifStmt.Condition);
-                CheckBlock(ifStmt.Body);
-                foreach (var elif in ifStmt.Elifs)
-                {
-                    InferType(elif.Condition);
-                    CheckBlock(elif.Body);
-                }
-                if (ifStmt.ElseBody is not null)
-                    CheckBlock(ifStmt.ElseBody);
+                CheckIfStatement(ifStmt);
                 break;
 
             case WhileStatement whileStmt:
@@ -481,6 +486,92 @@ public sealed class TypeChecker
             case RaiseStatement:
                 break;
         }
+    }
+
+    private void CheckIfStatement(IfStatement ifStmt)
+    {
+        InferType(ifStmt.Condition);
+
+        // Detect "if x is None" / "if x is not None" pattern for flow narrowing
+        var (narrowVar, narrowType, isNegated) = ExtractNullCheck(ifStmt.Condition);
+
+        if (narrowVar is not null && narrowType is not null)
+        {
+            if (!isNegated)
+            {
+                // Pattern: if x is None: <body>
+                // Inside the body, x is still nullable (it IS None).
+                // If the body ends with an early exit, narrow x after the if.
+                CheckBlock(ifStmt.Body);
+
+                foreach (var elif in ifStmt.Elifs)
+                {
+                    InferType(elif.Condition);
+                    CheckBlock(elif.Body);
+                }
+                if (ifStmt.ElseBody is not null)
+                    CheckBlock(ifStmt.ElseBody);
+
+                // If the if-body has an early exit, narrow x in the continuation
+                if (BlockHasEarlyExit(ifStmt.Body))
+                    _narrowedTypes[narrowVar] = narrowType;
+            }
+            else
+            {
+                // Pattern: if x is not None: <body>
+                // Inside the body, x is narrowed to non-null.
+                _narrowedTypes[narrowVar] = narrowType;
+                CheckBlock(ifStmt.Body);
+                _narrowedTypes.Remove(narrowVar);
+
+                foreach (var elif in ifStmt.Elifs)
+                {
+                    InferType(elif.Condition);
+                    CheckBlock(elif.Body);
+                }
+                if (ifStmt.ElseBody is not null)
+                    CheckBlock(ifStmt.ElseBody);
+            }
+        }
+        else
+        {
+            // Not a null-check pattern — standard checking
+            CheckBlock(ifStmt.Body);
+            foreach (var elif in ifStmt.Elifs)
+            {
+                InferType(elif.Condition);
+                CheckBlock(elif.Body);
+            }
+            if (ifStmt.ElseBody is not null)
+                CheckBlock(ifStmt.ElseBody);
+        }
+    }
+
+    /// <summary>
+    /// Extracts null-check info from an <c>is None</c> / <c>is not None</c> condition.
+    /// Returns (variableName, innerNonNullType, isNegated) if the pattern matches,
+    /// or (null, null, false) otherwise.
+    /// </summary>
+    private (string? VarName, CulebralType? InnerType, bool Negated) ExtractNullCheck(Expression condition)
+    {
+        if (condition is IsExpr { Left: IdentifierExpr ident, Type: SimpleType { Name: "None" } } isExpr)
+        {
+            var symbol = _currentScope.Lookup(ident.Name);
+            if (symbol?.Type is NullableCulebralType nullable)
+                return (ident.Name, nullable.Inner, isExpr.Negated);
+        }
+        return (null, null, false);
+    }
+
+    /// <summary>
+    /// Returns true if the block ends with an early-exit statement (return, raise, break, continue).
+    /// </summary>
+    private static bool BlockHasEarlyExit(Block block)
+    {
+        if (block.Statements.Count == 0)
+            return false;
+
+        return block.Statements[^1] is ReturnStatement or RaiseStatement or BreakStatement or ContinueStatement;
     }
 
     private void CheckAssignment(AssignmentStatement assign)
@@ -763,6 +854,10 @@ public sealed class TypeChecker
 
     private CulebralType InferIdentifier(IdentifierExpr ident)
     {
+        // Check flow-narrowed types first (e.g., after "if x is None: return")
+        if (_narrowedTypes.TryGetValue(ident.Name, out var narrowed))
+            return narrowed;
+
         var symbol = _currentScope.Lookup(ident.Name);
         if (symbol is null)
         {
@@ -813,6 +908,14 @@ public sealed class TypeChecker
         // String repetition: str * int → str
         if (bin.Op == Lexer.TokenKind.Star && left == PrimitiveType.Str && right == PrimitiveType.Int)
             return PrimitiveType.Str;
+
+        // Dict merge: dict | dict → dict
+        if (bin.Op == Lexer.TokenKind.Pipe && left is GenericInstanceType { Name: "dict" })
+            return left;
+
+        // Power operator always returns float (negative/fractional exponents produce floats)
+        if (bin.Op == Lexer.TokenKind.DoubleStar)
+            return PrimitiveType.Float;
 
         // Numeric operations
         if (left == PrimitiveType.Float || right == PrimitiveType.Float)

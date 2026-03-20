@@ -402,4 +402,20 @@ public class ParserTests
         var whileStmt = Assert.IsType<WhileStatement>(ast.Statements[0]);
         Assert.Null(whileStmt.ElseBody);
     }
+
+    [Fact]
+    public void MultiTypeGenericArgs_ParsesAsTupleIndex()
+    {
+        var ast = Parse("Dictionary[str, int]()\n");
+        var exprStmt = Assert.IsType<ExpressionStatement>(ast.Statements[0]);
+        var call = Assert.IsType<CallExpr>(exprStmt.Expr);
+        var index = Assert.IsType<IndexExpr>(call.Callee);
+        Assert.IsType<IdentifierExpr>(index.Object);
+        var tuple = Assert.IsType<TupleExpr>(index.Index);
+        Assert.Equal(2, tuple.Elements.Count);
+        var first = Assert.IsType<IdentifierExpr>(tuple.Elements[0]);
+        Assert.Equal("str", first.Name);
+        var second = Assert.IsType<IdentifierExpr>(tuple.Elements[1]);
+        Assert.Equal("int", second.Name);
+    }
 }

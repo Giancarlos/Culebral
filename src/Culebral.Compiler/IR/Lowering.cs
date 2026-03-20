@@ -1615,6 +1615,17 @@ public sealed class IrLowering
                     break;
                 }
 
+                // ── Dict merge: dict | dict ──
+                if (binOp == IrBinaryOpKind.BitOr
+                    && leftType is GenericInstanceType { Name: "dict" }
+                    && rightType is GenericInstanceType { Name: "dict" })
+                {
+                    LowerExpression(bin.Left);
+                    LowerExpression(bin.Right);
+                    _currentBlock!.Emit(new IrDictMerge(expr.Span));
+                    break;
+                }
+
                 var isArithmetic = binOp is IrBinaryOpKind.Add or IrBinaryOpKind.Sub or IrBinaryOpKind.Mul
                     or IrBinaryOpKind.Div or IrBinaryOpKind.IntDiv or IrBinaryOpKind.Mod or IrBinaryOpKind.Pow;
 
@@ -1935,11 +1946,28 @@ public sealed class IrLowering
         // Generic method call: method[TypeArg](args) → CallExpr(IndexExpr(callee, typeArg), args)
         if (call.Callee is IndexExpr { Object: var genericCallee, Index: var typeArgExpr })
         {
-            var typeArg = ResolveExprToClrType(typeArgExpr);
-            if (typeArg is not null)
+            // Resolve type arguments — single or multiple (TupleExpr)
+            Type[]? typeArgs = null;
+            if (typeArgExpr is TupleExpr tupleTypeArgs)
             {
-                var typeArgs = new[] { typeArg };
+                var resolved = new List<Type>();
+                foreach (var elem in tupleTypeArgs.Elements)
+                {
+                    var t = ResolveExprToClrType(elem);
+                    if (t is null) { resolved = null; break; }
+                    resolved.Add(t);
+                }
+                typeArgs = resolved?.ToArray();
+            }
+            else
+            {
+                var typeArg = ResolveExprToClrType(typeArgExpr);
+                if (typeArg is not null)
+                    typeArgs = [typeArg];
+            }
 
+            if (typeArgs is not null)
+            {
                 // Static generic: Type.method[T](args)
                 if (genericCallee is MemberAccessExpr genMember)
                 {
@@ -1984,13 +2012,17 @@ public sealed class IrLowering
                     }
                 }
 
-                // Standalone generic: func[T](args) — e.g., imported static generic
+                // Standalone generic: Type[T1, T2](args) — e.g., Dictionary[str, int]()
                 if (genericCallee is IdentifierExpr genFuncId && ResolveDotNetType(genFuncId.Name) is Type genStaticType)
                 {
+                    // If the resolved type is a generic type definition, make the concrete generic type
+                    var concreteType = genStaticType;
+                    if (genStaticType.IsGenericTypeDefinition && typeArgs.Length == genStaticType.GetGenericArguments().Length)
+                        concreteType = genStaticType.MakeGenericType(typeArgs);
+
                     foreach (var arg in call.Arguments)
                         LowerExpression(arg.Value);
-                    // Treat as constructor — generic types don't need MakeGenericMethod
-                    _currentBlock.Emit(new IrNewDotNetObj(genStaticType, call.Arguments.Count, call.Span));
+                    _currentBlock.Emit(new IrNewDotNetObj(concreteType, call.Arguments.Count, call.Span));
                     return;
                 }
             }

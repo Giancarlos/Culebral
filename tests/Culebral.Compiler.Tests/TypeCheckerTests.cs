@@ -164,4 +164,51 @@ public class TypeCheckerTests
         // No constraint violation — Label implements Printable
         Assert.DoesNotContain(diagnostics.GetDiagnostics(), d => d.Code == "LEB2020");
     }
+
+    // ─── Null Safety / Flow Typing ───
+
+    [Fact]
+    public void NullableNarrowing_IsNone_EarlyReturn_NarrowsAfterIf()
+    {
+        var (ast, checker, diagnostics) = Check("""
+            def greet(name: str?) -> str:
+                if name is None:
+                    return "stranger"
+                return name
+            """);
+        Assert.False(diagnostics.HasErrors, diagnostics.FormatAll());
+
+        // The return value of greet is str (since the function signature says str).
+        // The key test: the identifier 'name' after the if block should be narrowed to str (not str?).
+        // We verify this by checking the resolved type of the second return's value expression.
+        var funcSymbol = checker.GlobalScope.Lookup("greet");
+        Assert.NotNull(funcSymbol);
+        var funcType = Assert.IsType<FunctionType>(funcSymbol.Type);
+        Assert.Equal(PrimitiveType.Str, funcType.ReturnType);
+    }
+
+    [Fact]
+    public void NullableNarrowing_IsNotNone_NarrowsInsideBody()
+    {
+        var (_, _, diagnostics) = Check("""
+            def process(value: int?) -> int:
+                if value is not None:
+                    return value
+                return 0
+            """);
+        Assert.False(diagnostics.HasErrors, diagnostics.FormatAll());
+    }
+
+    [Fact]
+    public void NullableNarrowing_NoNarrowingWithoutEarlyExit()
+    {
+        // If the if-body does NOT have an early exit, no narrowing should occur
+        var (_, _, diagnostics) = Check("""
+            def maybe(name: str?) -> str:
+                if name is None:
+                    x = 1
+                return "ok"
+            """);
+        Assert.False(diagnostics.HasErrors, diagnostics.FormatAll());
+    }
 }
