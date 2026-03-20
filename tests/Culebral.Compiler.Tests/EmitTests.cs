@@ -3004,4 +3004,140 @@ public class EmitTests : IDisposable
             """);
         Assert.Equal("3", output);
     }
+
+    [Fact]
+    public void ListConcat_PlusOperator_ConcatenatesLists()
+    {
+        var output = CompileAndRun("""
+            def main():
+                a = [1, 2] + [3, 4]
+                print(len(a))
+            """);
+        Assert.Equal("4", output);
+    }
+
+    [Fact]
+    public void ListRepeat_StarOperator_RepeatsElements()
+    {
+        var output = CompileAndRun("""
+            def main():
+                b = [0] * 3
+                print(len(b))
+            """);
+        Assert.Equal("3", output);
+    }
+
+    [Fact]
+    public void StringRepeat_StarOperator_RepeatsString()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print("ha" * 3)
+            """);
+        Assert.Equal("hahaha", output);
+    }
+
+    [Fact]
+    public void StringIn_SubstringCheck_ReturnsCorrectBool()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print("bc" in "abcd")
+                print("xy" in "abcd")
+            """);
+        Assert.Equal("True\nFalse", output);
+    }
+
+    // ─── Tier 2: Chained Assignment ───
+
+    [Fact]
+    public void ChainedAssignment_ThreeVariables_AllGetSameValue()
+    {
+        var output = CompileAndRun("""
+            def main():
+                a = b = c = 42
+                print(a, b, c)
+            """);
+        Assert.Equal("42 42 42", output);
+    }
+
+    [Fact]
+    public void ChainedAssignment_TwoVariables_BothGetValue()
+    {
+        var output = CompileAndRun("""
+            def main():
+                x = y = 7
+                print(x, y)
+            """);
+        Assert.Equal("7 7", output);
+    }
+
+    [Fact]
+    public void ChainedAssignment_StringValue_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                a = b = "hello"
+                print(a, b)
+            """);
+        Assert.Equal("hello hello", output);
+    }
+
+    // ─── Tier 2: List Extend via += ───
+
+    [Fact]
+    public void ListExtend_PlusEquals_AddsElements()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = [1, 2, 3]
+                items += [4, 5]
+                print(len(items))
+            """);
+        Assert.Equal("5", output);
+    }
+
+    [Fact]
+    public void ListExtend_PlusEquals_EmptyList_NoChange()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = [1, 2]
+                items += []
+                print(len(items))
+            """);
+        Assert.Equal("2", output);
+    }
+
+    // ─── Tier 2: Multiple Except Types ───
+
+    [Fact]
+    public void MultipleExceptTypes_CatchesFirstType()
+    {
+        var output = CompileAndRun("""
+            def main():
+                try:
+                    x = int("abc")
+                except (FormatException, OverflowException) as e:
+                    print("caught")
+            """);
+        Assert.Equal("caught", output);
+    }
+
+    // ─── Tier 2: Call-site Unpacking ───
+
+    [Fact]
+    public void CallSiteUnpacking_BasicList_ExpandsArguments()
+    {
+        var output = CompileAndRun("""
+            def add(a: int, b: int) -> int:
+                return a + b
+
+            def main():
+                args = [3, 4]
+                result = add(*args)
+                print(result)
+            """);
+        Assert.Equal("7", output);
+    }
 }

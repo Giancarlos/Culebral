@@ -43,6 +43,14 @@ public sealed record AssertStatement(
     Expression? Message,
     SourceSpan Span) : Statement(Span);
 
+/// <summary>
+/// A compound statement that holds multiple statements desugared from a single source construct
+/// (e.g., chained assignment a = b = c = 0 → c = 0; b = c; a = b).
+/// </summary>
+public sealed record CompoundStatement(
+    List<Statement> Statements,
+    SourceSpan Span) : Statement(Span);
+
 // ─── Variable Declaration / Assignment ───
 
 public sealed record AssignmentStatement(
@@ -324,6 +332,7 @@ public sealed record CallExpr(
 public sealed record Argument(
     string? Name,
     Expression Value,
+    bool IsUnpacked,
     SourceSpan Span) : AstNode(Span);
 
 public sealed record MemberAccessExpr(

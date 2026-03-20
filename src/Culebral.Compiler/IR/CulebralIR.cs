@@ -224,5 +224,13 @@ public sealed record IrNewArrayFromStack(int Count, SourceSpan Span) : IrInstruc
 // Generator yield — adds the value on the stack to the generator list
 public sealed record IrYield(SourceSpan Span) : IrInstruction(Span);
 
+// Collection / string operators
+/// <summary>List concatenation: stack [left_list, right_list] → new list with all elements.</summary>
+public sealed record IrListConcat(SourceSpan Span) : IrInstruction(Span);
+/// <summary>List repetition: stack [list, int_count] → new list with elements repeated count times.</summary>
+public sealed record IrListRepeat(SourceSpan Span) : IrInstruction(Span);
+/// <summary>String repetition: stack [string, int_count] → repeated string.</summary>
+public sealed record IrStringRepeat(SourceSpan Span) : IrInstruction(Span);
+
 // Python-compatible print() — positional args are on the stack, named args are compile-time constants
 public sealed record IrPrint(int PositionalArgCount, string? Sep, string? End, bool Flush, bool UseStderr, SourceSpan Span) : IrInstruction(Span);

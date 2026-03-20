@@ -1136,6 +1136,84 @@ public sealed class CilEmitter
                 break;
             }
 
+            // ─── List concatenation ───
+
+            case IrListConcat:
+            {
+                // Stack: [left_list (List<object>), right_list (List<object>)]
+                // → new List<object>(left_list) then AddRange(right_list)
+                var rightTemp = il.DeclareLocal(typeof(List<object>));
+                il.Emit(OpCodes.Castclass, typeof(List<object>));
+                il.Emit(OpCodes.Stloc, rightTemp);
+                il.Emit(OpCodes.Castclass, typeof(System.Collections.Generic.IEnumerable<object>));
+                il.Emit(OpCodes.Newobj, typeof(List<object>).GetConstructor([typeof(System.Collections.Generic.IEnumerable<object>)])!);
+                il.Emit(OpCodes.Dup);
+                il.Emit(OpCodes.Ldloc, rightTemp);
+                il.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("AddRange")!);
+                break;
+            }
+
+            // ─── List repetition ───
+
+            case IrListRepeat:
+            {
+                // Stack: [list (List<object>), count (int)]
+                // → new List<object>(), loop count times calling AddRange
+                var countTemp = il.DeclareLocal(typeof(int));
+                var srcTemp = il.DeclareLocal(typeof(List<object>));
+                il.Emit(OpCodes.Stloc, countTemp);
+                il.Emit(OpCodes.Castclass, typeof(List<object>));
+                il.Emit(OpCodes.Stloc, srcTemp);
+                il.Emit(OpCodes.Newobj, typeof(List<object>).GetConstructor(Type.EmptyTypes)!);
+                // Loop: i = 0; while (i < count) { result.AddRange(src); i++; }
+                var loopIdx = il.DeclareLocal(typeof(int));
+                il.Emit(OpCodes.Ldc_I4_0);
+                il.Emit(OpCodes.Stloc, loopIdx);
+                var loopCheck = il.DefineLabel();
+                var loopBody = il.DefineLabel();
+                il.Emit(OpCodes.Br, loopCheck);
+                il.MarkLabel(loopBody);
+                il.Emit(OpCodes.Dup); // dup result list
+                il.Emit(OpCodes.Ldloc, srcTemp);
+                il.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("AddRange")!);
+                il.Emit(OpCodes.Ldloc, loopIdx);
+                il.Emit(OpCodes.Ldc_I4_1);
+                il.Emit(OpCodes.Add);
+                il.Emit(OpCodes.Stloc, loopIdx);
+                il.MarkLabel(loopCheck);
+                il.Emit(OpCodes.Ldloc, loopIdx);
+                il.Emit(OpCodes.Ldloc, countTemp);
+                il.Emit(OpCodes.Blt, loopBody);
+                // result list remains on stack
+                break;
+            }
+
+            // ─── String repetition ───
+
+            case IrStringRepeat:
+            {
+                // Stack: [string, int_count]
+                // → new StringBuilder(str.Length * count).Insert(0, str, count).ToString()
+                var countTemp = il.DeclareLocal(typeof(int));
+                var strTemp = il.DeclareLocal(typeof(string));
+                il.Emit(OpCodes.Stloc, countTemp);
+                il.Emit(OpCodes.Stloc, strTemp);
+                // str.Length * count → capacity
+                il.Emit(OpCodes.Ldloc, strTemp);
+                il.Emit(OpCodes.Callvirt, typeof(string).GetProperty("Length")!.GetGetMethod()!);
+                il.Emit(OpCodes.Ldloc, countTemp);
+                il.Emit(OpCodes.Mul);
+                il.Emit(OpCodes.Newobj, typeof(System.Text.StringBuilder).GetConstructor([typeof(int)])!);
+                // .Insert(0, str, count)
+                il.Emit(OpCodes.Ldc_I4_0);
+                il.Emit(OpCodes.Ldloc, strTemp);
+                il.Emit(OpCodes.Ldloc, countTemp);
+                il.Emit(OpCodes.Callvirt, typeof(System.Text.StringBuilder).GetMethod("Insert", [typeof(int), typeof(string), typeof(int)])!);
+                // .ToString()
+                il.Emit(OpCodes.Callvirt, typeof(object).GetMethod("ToString")!);
+                break;
+            }
+
             // ─── Array from stack (for varargs) ───
 
             case IrNewArrayFromStack { Count: var count }:
@@ -3397,6 +3475,9 @@ public sealed class CilEmitter
             IrInvokeDelegate => typeof(object),
             IrSlice => typeof(object),
             IrNewArrayFromStack => typeof(object[]),
+            IrListConcat => typeof(List<object>),
+            IrListRepeat => typeof(List<object>),
+            IrStringRepeat => typeof(string),
             _ => typeof(object),
         };
     }

@@ -959,6 +959,11 @@ public sealed class IrLowering
                 }
                 break;
 
+            case CompoundStatement compound:
+                foreach (var inner in compound.Statements)
+                    LowerStatement(inner);
+                break;
+
             case AssignmentStatement assign:
                 LowerAssignment(assign);
                 break;
@@ -1172,6 +1177,15 @@ public sealed class IrLowering
             var local = _currentFunction.Locals.FirstOrDefault(l => l.Name == ident.Name);
             if (local is not null)
             {
+                // List extend: items += [4, 5] → items.AddRange(rhs)
+                if (augAssign.Op == Lexer.TokenKind.PlusAssign && IsListType(local.Type))
+                {
+                    _currentBlock.Emit(new IrLoadLocal(local.Index, augAssign.Span));
+                    LowerExpression(augAssign.Value);
+                    _currentBlock.Emit(new IrCallDotNetInstance(typeof(List<object>), "AddRange", 1, augAssign.Span));
+                    return;
+                }
+
                 _currentBlock.Emit(new IrLoadLocal(local.Index, augAssign.Span));
                 LowerExpression(augAssign.Value);
                 _currentBlock.Emit(new IrBinaryOp(MapAugmentedOp(augAssign.Op), local.Type, augAssign.Span));
@@ -1184,6 +1198,17 @@ public sealed class IrLowering
                 _currentTypeDef.Fields.Any(f => f.Name == ident.Name))
             {
                 var field = _currentTypeDef.Fields.First(f => f.Name == ident.Name);
+
+                // List extend for fields
+                if (augAssign.Op == Lexer.TokenKind.PlusAssign && IsListType(field.Type))
+                {
+                    _currentBlock.Emit(new IrLoadThis(augAssign.Span));
+                    _currentBlock.Emit(new IrLoadField(_currentDeclaringType, ident.Name, augAssign.Span));
+                    LowerExpression(augAssign.Value);
+                    _currentBlock.Emit(new IrCallDotNetInstance(typeof(List<object>), "AddRange", 1, augAssign.Span));
+                    return;
+                }
+
                 // Load current value: this.field
                 _currentBlock.Emit(new IrLoadThis(augAssign.Span));
                 _currentBlock.Emit(new IrLoadField(_currentDeclaringType, ident.Name, augAssign.Span));
@@ -1201,10 +1226,72 @@ public sealed class IrLowering
 
             // Fallback: create a new local
             var newLocal = GetOrCreateLocal(ident.Name, augAssign.Span);
+
+            // List extend for new locals
+            if (augAssign.Op == Lexer.TokenKind.PlusAssign && IsListType(newLocal.Type))
+            {
+                _currentBlock.Emit(new IrLoadLocal(newLocal.Index, augAssign.Span));
+                LowerExpression(augAssign.Value);
+                _currentBlock.Emit(new IrCallDotNetInstance(typeof(List<object>), "AddRange", 1, augAssign.Span));
+                return;
+            }
+
             _currentBlock.Emit(new IrLoadLocal(newLocal.Index, augAssign.Span));
             LowerExpression(augAssign.Value);
             _currentBlock.Emit(new IrBinaryOp(MapAugmentedOp(augAssign.Op), newLocal.Type, augAssign.Span));
             _currentBlock.Emit(new IrStoreLocal(newLocal.Index, augAssign.Span));
+        }
+    }
+
+    private static bool IsListType(CulebralType type) =>
+        type is GenericInstanceType git && git.Name == "list";
+
+    /// <summary>
+    /// Lower call arguments when one or more are unpacked (*args).
+    /// Non-unpacked args are lowered normally. Unpacked args are stored to a temp
+    /// and then individual elements are accessed by index to fill parameter slots.
+    /// </summary>
+    private void LowerCallWithUnpacking(List<Argument> arguments, int targetParamCount, SourceSpan span,
+        List<IrParameter>? targetParams = null)
+    {
+        if (_currentBlock is null || _currentFunction is null) return;
+
+        // Count non-unpacked arguments
+        int normalCount = arguments.Count(a => !a.IsUnpacked);
+        int unpackedNeeded = targetParamCount - normalCount;
+
+        int paramSlot = 0;
+        foreach (var arg in arguments)
+        {
+            if (!arg.IsUnpacked)
+            {
+                LowerExpression(arg.Value);
+                paramSlot++;
+            }
+            else
+            {
+                // Lower the iterable and store to temp
+                LowerExpression(arg.Value);
+                var tempLocal = CreateLocal("<unpack_tmp>", PrimitiveType.Object);
+                _currentBlock.Emit(new IrStoreLocal(tempLocal.Index, span));
+
+                // Emit index-based access for each element needed
+                for (int i = 0; i < unpackedNeeded; i++)
+                {
+                    _currentBlock.Emit(new IrLoadLocal(tempLocal.Index, span));
+                    _currentBlock.Emit(new IrLoadInt(i, span));
+                    _currentBlock.Emit(new IrLoadElement(span));
+
+                    // Unbox if target parameter is a value type (IrLoadElement returns object)
+                    if (targetParams is not null && paramSlot < targetParams.Count)
+                    {
+                        var paramType = targetParams[paramSlot].Type;
+                        if (paramType is PrimitiveType pt && pt.ClrType is not null && pt.ClrType.IsValueType)
+                            _currentBlock.Emit(new IrUnbox(pt, span));
+                    }
+                    paramSlot++;
+                }
+            }
         }
     }
 
@@ -1497,6 +1584,36 @@ public sealed class IrLowering
                     leftType = RefineFieldAccessType(bin.Left) ?? leftType;
                 if (rightType == PrimitiveType.Object)
                     rightType = RefineFieldAccessType(bin.Right) ?? rightType;
+
+                // ── List concatenation: list + list ──
+                if (binOp == IrBinaryOpKind.Add && leftType is GenericInstanceType { Name: "list" }
+                    && rightType is GenericInstanceType { Name: "list" })
+                {
+                    LowerExpression(bin.Left);
+                    LowerExpression(bin.Right);
+                    _currentBlock!.Emit(new IrListConcat(expr.Span));
+                    break;
+                }
+
+                // ── List repetition: list * int ──
+                if (binOp == IrBinaryOpKind.Mul && leftType is GenericInstanceType { Name: "list" }
+                    && rightType == PrimitiveType.Int)
+                {
+                    LowerExpression(bin.Left);
+                    LowerExpression(bin.Right);
+                    _currentBlock!.Emit(new IrListRepeat(expr.Span));
+                    break;
+                }
+
+                // ── String repetition: str * int ──
+                if (binOp == IrBinaryOpKind.Mul && leftType == PrimitiveType.Str
+                    && rightType == PrimitiveType.Int)
+                {
+                    LowerExpression(bin.Left);
+                    LowerExpression(bin.Right);
+                    _currentBlock!.Emit(new IrStringRepeat(expr.Span));
+                    break;
+                }
 
                 var isArithmetic = binOp is IrBinaryOpKind.Add or IrBinaryOpKind.Sub or IrBinaryOpKind.Mul
                     or IrBinaryOpKind.Div or IrBinaryOpKind.IntDiv or IrBinaryOpKind.Mod or IrBinaryOpKind.Pow;
@@ -1980,11 +2097,28 @@ public sealed class IrLowering
             }
             else if (_functionDefs.ContainsKey(ident.Name))
             {
-                foreach (var arg in call.Arguments)
-                    LowerExpression(arg.Value);
-                EmitDefaultArgs(ident.Name, call.Arguments.Count, call.Span);
-                var totalArgs = GetTotalArgCount(ident.Name, call.Arguments.Count);
-                _currentBlock.Emit(new IrCall(ident.Name, totalArgs, true, call.Span));
+                // Check for call-site unpacking: f(*args)
+                if (call.Arguments.Any(a => a.IsUnpacked) &&
+                    _functionDefs.TryGetValue(ident.Name, out var targetFunc))
+                {
+                    // Resolve target function's parameter types for unboxing
+                    var targetParams = targetFunc.Parameters.Select((p, i) => new IrParameter
+                    {
+                        Name = p.Name,
+                        Type = _typeChecker.ResolveTypeAnnotation(p.Type),
+                        Index = i,
+                    }).ToList();
+                    LowerCallWithUnpacking(call.Arguments, targetFunc.Parameters.Count, call.Span, targetParams);
+                    _currentBlock.Emit(new IrCall(ident.Name, targetFunc.Parameters.Count, true, call.Span));
+                }
+                else
+                {
+                    foreach (var arg in call.Arguments)
+                        LowerExpression(arg.Value);
+                    EmitDefaultArgs(ident.Name, call.Arguments.Count, call.Span);
+                    var totalArgs = GetTotalArgCount(ident.Name, call.Arguments.Count);
+                    _currentBlock.Emit(new IrCall(ident.Name, totalArgs, true, call.Span));
+                }
             }
             else
             {
@@ -2489,7 +2623,12 @@ public sealed class IrLowering
         // Check if collection is a user type with __contains__ → call Contains (our emitted alias)
         var collType = ResolveExpressionType(inExpr.Right);
         var collTypeName = collType?.DisplayName;
-        if (collTypeName is not null && _typeDefs.TryGetValue(collTypeName, out var collTypeDef) &&
+        if (collType == PrimitiveType.Str)
+        {
+            // String substring check: "bc" in "abcd" → "abcd".Contains("bc")
+            _currentBlock.Emit(new IrCallDotNetInstance(typeof(string), "Contains", 1, inExpr.Span));
+        }
+        else if (collTypeName is not null && _typeDefs.TryGetValue(collTypeName, out var collTypeDef) &&
             collTypeDef.Methods.Any(m => m.Name == "__contains__"))
         {
             _currentBlock.Emit(new IrCallMethod(collTypeName, "Contains", 1, inExpr.Span));

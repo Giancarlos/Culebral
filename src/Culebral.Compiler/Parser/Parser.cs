@@ -579,17 +579,44 @@ public sealed class CulebralParser
 
             TypeAnnotation? exType = null;
             string? variable = null;
+            List<TypeAnnotation>? multiTypes = null;
 
             if (Current.Kind != TokenKind.Colon)
             {
-                exType = ParseTypeAnnotation();
+                // Check for multiple exception types: except (ValueError, TypeError) as e:
+                if (Current.Kind == TokenKind.LeftParen)
+                {
+                    Advance(); // consume '('
+                    multiTypes = new List<TypeAnnotation> { ParseTypeAnnotation() };
+                    while (TryConsume(TokenKind.Comma))
+                    {
+                        if (Current.Kind == TokenKind.RightParen) break;
+                        multiTypes.Add(ParseTypeAnnotation());
+                    }
+                    Expect(TokenKind.RightParen);
+                }
+                else
+                {
+                    exType = ParseTypeAnnotation();
+                }
+
                 if (TryConsume(TokenKind.KwAs))
                     variable = Expect(TokenKind.Identifier).Lexeme;
             }
 
             Expect(TokenKind.Colon);
             var excBody = ParseBlock();
-            exceptClauses.Add(new ExceptClause(exType, variable, excBody, new SourceSpan(excStart, excBody.Span.End)));
+
+            if (multiTypes is not null)
+            {
+                // Desugar: produce one ExceptClause per type, all sharing the same body and variable
+                foreach (var mt in multiTypes)
+                    exceptClauses.Add(new ExceptClause(mt, variable, excBody, new SourceSpan(excStart, excBody.Span.End)));
+            }
+            else
+            {
+                exceptClauses.Add(new ExceptClause(exType, variable, excBody, new SourceSpan(excStart, excBody.Span.End)));
+            }
         }
 
         Block? finallyBody = null;
@@ -913,11 +940,46 @@ public sealed class CulebralParser
             return new AnnotatedAssignment(ident.Name, type, value, new SourceSpan(start, CurrentLocation()));
         }
 
-        // Simple assignment: target = value
+        // Simple assignment (with chained assignment support): target = value
+        // a = b = c = 0 → desugars to c = 0; b = c; a = b
         if (Current.Kind == TokenKind.Assign)
         {
             Advance();
             var value = ParseExpression();
+
+            // Check for chained assignment: if value is an identifier and next token is '='
+            if (Current.Kind == TokenKind.Assign && value is IdentifierExpr)
+            {
+                // Collect all targets: [a, b, c, ...] and final value
+                var targets = new List<Expression> { expr, value };
+                while (Current.Kind == TokenKind.Assign)
+                {
+                    Advance(); // consume '='
+                    var next = ParseExpression();
+                    if (Current.Kind == TokenKind.Assign && next is IdentifierExpr)
+                    {
+                        targets.Add(next);
+                    }
+                    else
+                    {
+                        // 'next' is the final value
+                        // Desugar: targets = [a, b, c], finalValue = 0
+                        // Produce: c = 0; b = c; a = b
+                        var stmts = new List<Statement>();
+                        var lastTarget = targets[^1];
+                        stmts.Add(new AssignmentStatement(lastTarget, next,
+                            new SourceSpan(lastTarget.Span.Start, next.Span.End)));
+                        for (int i = targets.Count - 2; i >= 0; i--)
+                        {
+                            stmts.Add(new AssignmentStatement(targets[i], lastTarget,
+                                new SourceSpan(targets[i].Span.Start, lastTarget.Span.End)));
+                            lastTarget = targets[i];
+                        }
+                        return new CompoundStatement(stmts, new SourceSpan(start, CurrentLocation()));
+                    }
+                }
+            }
+
             return new AssignmentStatement(expr, value, new SourceSpan(start, CurrentLocation()));
         }
 
@@ -1260,6 +1322,14 @@ public sealed class CulebralParser
     {
         var start = Current.Span.Start;
 
+        // Check for call-site unpacking: *args
+        if (Current.Kind == TokenKind.Star)
+        {
+            Advance(); // consume '*'
+            var unpackExpr = ParseExpression();
+            return new Argument(null, unpackExpr, true, new SourceSpan(start, unpackExpr.Span.End));
+        }
+
         // Check for named argument: name=value
         if (Current.Kind == TokenKind.Identifier && Peek(1).Kind == TokenKind.Assign)
         {
@@ -1267,11 +1337,11 @@ public sealed class CulebralParser
             Advance(); // name
             Advance(); // =
             var value = ParseExpression();
-            return new Argument(name, value, new SourceSpan(start, value.Span.End));
+            return new Argument(name, value, false, new SourceSpan(start, value.Span.End));
         }
 
         var expr = ParseExpression();
-        return new Argument(null, expr, new SourceSpan(start, expr.Span.End));
+        return new Argument(null, expr, false, new SourceSpan(start, expr.Span.End));
     }
 
     private Expression ParseIndexOrSlice(Expression obj)

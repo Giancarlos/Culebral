@@ -390,6 +390,11 @@ public sealed class TypeChecker
                     InferType(ret.Value);
                 break;
 
+            case CompoundStatement compound:
+                foreach (var inner in compound.Statements)
+                    CheckStatement(inner);
+                break;
+
             case AssignmentStatement assign:
                 CheckAssignment(assign);
                 break;
@@ -795,6 +800,18 @@ public sealed class TypeChecker
 
         // String concatenation
         if (bin.Op == Lexer.TokenKind.Plus && (left == PrimitiveType.Str || right == PrimitiveType.Str))
+            return PrimitiveType.Str;
+
+        // List concatenation: list + list → list
+        if (bin.Op == Lexer.TokenKind.Plus && left is GenericInstanceType { Name: "list" })
+            return left;
+
+        // List repetition: list * int → list
+        if (bin.Op == Lexer.TokenKind.Star && left is GenericInstanceType { Name: "list" } && right == PrimitiveType.Int)
+            return left;
+
+        // String repetition: str * int → str
+        if (bin.Op == Lexer.TokenKind.Star && left == PrimitiveType.Str && right == PrimitiveType.Int)
             return PrimitiveType.Str;
 
         // Numeric operations
