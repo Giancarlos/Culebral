@@ -1771,7 +1771,14 @@ public sealed class IrLowering
 
             case AwaitExpr awaitExpr:
                 LowerExpression(awaitExpr.Operand);
-                // TODO: emit await pattern
+                // Determine if the await produces a value (Task<T> vs Task)
+                var awaitType = _typeChecker.ResolvedTypes.TryGetValue(awaitExpr.Operand, out var at) ? at : PrimitiveType.Object;
+                bool awaitHasResult = awaitType != PrimitiveType.Void;
+                _currentBlock.Emit(new IrAwait(awaitHasResult, awaitExpr.Span));
+                // IrAwait leaves an object on the stack (from Task<object>.Result);
+                // unbox to the expected value type if needed
+                if (awaitHasResult && awaitType is PrimitiveType pt && pt.ClrBackingType.IsValueType)
+                    _currentBlock.Emit(new IrUnbox(awaitType, awaitExpr.Span));
                 break;
 
             case ListComprehension comp:
@@ -3071,6 +3078,7 @@ public sealed class IrLowering
             IrInvokeDelegate => true,
             IrSlice => true,
             IrNewArrayFromStack => true,
+            IrAwait { HasResult: var hr } => hr,
             IrStoreLocal or IrStoreField or IrPop or IrNop or IrReturn or IrBranch or IrBranchIf => false,
             _ => false,
         };

@@ -280,9 +280,18 @@ public sealed class CilEmitter
 
     private void EmitMethod(TypeBuilder tb, IrFunction method, IrTypeDef typeDef)
     {
-        var returnClrType = method.IsGenerator
-            ? typeof(System.Collections.IEnumerable)
-            : ResolveClrType(method.ReturnType);
+        Type returnClrType;
+        if (method.IsGenerator)
+            returnClrType = typeof(System.Collections.IEnumerable);
+        else if (method.IsAsync)
+        {
+            var innerType = ResolveClrType(method.ReturnType);
+            returnClrType = innerType == typeof(void)
+                ? typeof(System.Threading.Tasks.Task)
+                : typeof(System.Threading.Tasks.Task<>).MakeGenericType(typeof(object));
+        }
+        else
+            returnClrType = ResolveClrType(method.ReturnType);
         var paramClrTypes = method.Parameters.Select(p => ResolveClrType(p.Type)).ToArray();
 
         // Check for dunder → override mapping (__str__ → ToString, __repr__ → ToString, __hash__ → GetHashCode)
@@ -563,14 +572,26 @@ public sealed class CilEmitter
             if (func.DeclaringType is not null)
                 continue;
 
-            var returnClrType = func.IsGenerator
-                ? typeof(System.Collections.IEnumerable)
-                : ResolveClrType(func.ReturnType);
+            Type returnClrType;
+            if (func.IsGenerator)
+                returnClrType = typeof(System.Collections.IEnumerable);
+            else if (func.IsAsync)
+            {
+                var innerType = ResolveClrType(func.ReturnType);
+                returnClrType = innerType == typeof(void)
+                    ? typeof(System.Threading.Tasks.Task)
+                    : typeof(System.Threading.Tasks.Task<>).MakeGenericType(typeof(object));
+            }
+            else
+                returnClrType = ResolveClrType(func.ReturnType);
             var paramClrTypes = func.Parameters.Select(p => ResolveClrType(p.Type)).ToArray();
 
             var methodAttrs = MethodAttributes.Public | MethodAttributes.Static;
+            // For async entry points, name the async method differently; we'll create a sync Main wrapper
+            var emitName = func.IsEntryPoint && func.IsAsync ? "__async_main" :
+                           func.IsEntryPoint ? "Main" : func.Name;
             var mb = programType.DefineMethod(
-                func.IsEntryPoint ? "Main" : func.Name,
+                emitName,
                 methodAttrs, returnClrType, paramClrTypes);
 
             for (int i = 0; i < func.Parameters.Count; i++)
@@ -588,8 +609,22 @@ public sealed class CilEmitter
             // Apply decorator attributes
             ApplyDecoratorAttributes(mb, func);
 
-            if (func.IsEntryPoint)
+            if (func.IsEntryPoint && !func.IsAsync)
                 _entryPointMethod = mb;
+            else if (func.IsEntryPoint && func.IsAsync)
+            {
+                // Create a sync Main() wrapper that calls the async main and waits
+                var syncMain = programType.DefineMethod("Main",
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(void), Type.EmptyTypes);
+                var syncIl = syncMain.GetILGenerator();
+                syncIl.Emit(OpCodes.Call, mb);
+                // The async main returns Task or Task<object>; call Wait() to block
+                syncIl.Emit(OpCodes.Callvirt,
+                    typeof(System.Threading.Tasks.Task).GetMethod("Wait", Type.EmptyTypes)!);
+                syncIl.Emit(OpCodes.Ret);
+                _entryPointMethod = syncMain;
+            }
         }
 
         // Pass 2: Emit all method bodies (all methods are now resolvable)
@@ -802,6 +837,12 @@ public sealed class CilEmitter
             case IrReturn { HasValue: false }:
                 if (generatorListLocal is not null)
                     il.Emit(OpCodes.Ldloc, generatorListLocal);
+                else if (func.IsAsync)
+                {
+                    // Void async: return Task.CompletedTask
+                    il.Emit(OpCodes.Call, typeof(System.Threading.Tasks.Task)
+                        .GetProperty("CompletedTask")!.GetGetMethod()!);
+                }
                 il.Emit(OpCodes.Ret);
                 break;
 
@@ -812,6 +853,16 @@ public sealed class CilEmitter
                     // return the collected list instead
                     il.Emit(OpCodes.Pop);
                     il.Emit(OpCodes.Ldloc, generatorListLocal);
+                }
+                else if (func.IsAsync)
+                {
+                    // Async with value: box value type to object, then wrap in Task.FromResult<object>()
+                    var innerClrType = ResolveClrType(func.ReturnType);
+                    if (innerClrType.IsValueType)
+                        il.Emit(OpCodes.Box, innerClrType);
+                    il.Emit(OpCodes.Call, typeof(System.Threading.Tasks.Task)
+                        .GetMethod("FromResult")!
+                        .MakeGenericMethod(typeof(object)));
                 }
                 il.Emit(OpCodes.Ret);
                 break;
@@ -832,6 +883,10 @@ public sealed class CilEmitter
                     // yield outside generator — just pop the value
                     il.Emit(OpCodes.Pop);
                 }
+                break;
+
+            case IrAwait { HasResult: var hasResult }:
+                EmitAwait(il, hasResult);
                 break;
 
             case IrPrint printInstr:
@@ -1409,6 +1464,25 @@ public sealed class CilEmitter
                 il.Emit(OpCodes.Ldc_I4_0);
                 il.Emit(OpCodes.Ceq);
                 break;
+        }
+    }
+
+    private void EmitAwait(ILGenerator il, bool hasResult)
+    {
+        // Stack has: Task or Task<object>
+        if (hasResult)
+        {
+            // Cast to Task<object> and get Result property (blocks until complete)
+            il.Emit(OpCodes.Castclass, typeof(System.Threading.Tasks.Task<object>));
+            il.Emit(OpCodes.Callvirt, typeof(System.Threading.Tasks.Task<object>)
+                .GetProperty("Result")!.GetGetMethod()!);
+        }
+        else
+        {
+            // Cast to Task and call Wait() (blocks until complete)
+            il.Emit(OpCodes.Castclass, typeof(System.Threading.Tasks.Task));
+            il.Emit(OpCodes.Callvirt, typeof(System.Threading.Tasks.Task)
+                .GetMethod("Wait", Type.EmptyTypes)!);
         }
     }
 

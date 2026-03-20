@@ -3140,4 +3140,109 @@ public class EmitTests : IDisposable
             """);
         Assert.Equal("7", output);
     }
+
+    // ─── Async / Await Tests ───
+
+    [Fact]
+    public void Async_VoidFunction_PrintsDirectly()
+    {
+        var output = CompileAndRun("""
+            async def do_stuff():
+                print("hello async")
+
+            def main():
+                do_stuff()
+            """);
+        Assert.Equal("hello async", output);
+    }
+
+    [Fact]
+    public void Async_AwaitReturnValue()
+    {
+        var output = CompileAndRun("""
+            async def get_value() -> int:
+                return 42
+
+            async def use_it():
+                x = await get_value()
+                print(x)
+
+            def main():
+                use_it()
+            """);
+        Assert.Equal("42", output);
+    }
+
+    [Fact]
+    public void Async_ChainedAwait()
+    {
+        var output = CompileAndRun("""
+            async def get_value() -> int:
+                return 21
+
+            async def double_it() -> int:
+                x = await get_value()
+                return x * 2
+
+            async def show_result():
+                result = await double_it()
+                print(result)
+
+            def main():
+                show_result()
+            """);
+        Assert.Equal("42", output);
+    }
+
+    [Fact]
+    public void Async_MainFunction()
+    {
+        var output = CompileAndRun("""
+            async def get_greeting() -> str:
+                return "hello from async main"
+
+            async def main():
+                msg = await get_greeting()
+                print(msg)
+            """);
+        Assert.Equal("hello from async main", output);
+    }
+
+    [Fact]
+    public void Async_MultipleAwaits()
+    {
+        var output = CompileAndRun("""
+            async def get_a() -> str:
+                return "hello"
+
+            async def get_b() -> str:
+                return "world"
+
+            async def combine():
+                a = await get_a()
+                b = await get_b()
+                print(a + " " + b)
+
+            def main():
+                combine()
+            """);
+        Assert.Equal("hello world", output);
+    }
+
+    [Fact]
+    public void Async_VoidAwait()
+    {
+        var output = CompileAndRun("""
+            async def side_effect():
+                print("effect")
+
+            async def caller():
+                await side_effect()
+                print("done")
+
+            def main():
+                caller()
+            """);
+        Assert.Equal("effect\ndone", output);
+    }
 }
