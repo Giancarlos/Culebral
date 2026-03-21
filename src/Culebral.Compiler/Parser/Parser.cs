@@ -143,7 +143,18 @@ public sealed class CulebralParser
         if (Current.Kind == TokenKind.RightParen)
             return parameters;
 
-        parameters.Add(ParseParameter());
+        var first = ParseParameter();
+        // Silently skip 'self' as first parameter (Python compatibility)
+        // self with no type annotation → not a real parameter
+        if (first.Name == "self" && first.Type is SimpleType { Name: "object" })
+        {
+            // Skip it — don't add to parameter list
+        }
+        else
+        {
+            parameters.Add(first);
+        }
+
         while (TryConsume(TokenKind.Comma))
         {
             if (Current.Kind == TokenKind.RightParen)

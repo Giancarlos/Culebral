@@ -1122,6 +1122,18 @@ public sealed class IrLowering
         }
         else if (assign.Target is MemberAccessExpr member)
         {
+            // self.field = value → this.field = value (Python compatibility)
+            if (member.Object is IdentifierExpr { Name: "self" } && _currentDeclaringType is not null && _currentTypeDef is not null)
+            {
+                var fType = _currentTypeDef.Fields.FirstOrDefault(f => f.Name == member.Member)?.Type ?? PrimitiveType.Object;
+                var tempLocal = CreateLocal($"<field_tmp_{member.Member}>", fType);
+                _currentBlock.Emit(new IrStoreLocal(tempLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrLoadThis(assign.Span));
+                _currentBlock.Emit(new IrLoadLocal(tempLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrStoreField(_currentDeclaringType, member.Member, assign.Span));
+                return;
+            }
+
             var objType = _typeChecker.ResolvedTypes.TryGetValue(member.Object, out var ot) ? ot : null;
             var typeName = objType?.DisplayName ?? "object";
 
@@ -1240,6 +1252,27 @@ public sealed class IrLowering
             LowerExpression(augAssign.Value);
             _currentBlock.Emit(new IrBinaryOp(MapAugmentedOp(augAssign.Op), newLocal.Type, augAssign.Span));
             _currentBlock.Emit(new IrStoreLocal(newLocal.Index, augAssign.Span));
+        }
+        else if (augAssign.Target is MemberAccessExpr member &&
+                 member.Object is IdentifierExpr { Name: "self" } &&
+                 _currentDeclaringType is not null && _currentTypeDef is not null)
+        {
+            // self.field += value → this.field = this.field + value
+            var fieldDef = _currentTypeDef.Fields.FirstOrDefault(f => f.Name == member.Member);
+            var fieldType = fieldDef?.Type ?? PrimitiveType.Object;
+
+            // Load current value: this.field
+            _currentBlock.Emit(new IrLoadThis(augAssign.Span));
+            _currentBlock.Emit(new IrLoadField(_currentDeclaringType, member.Member, augAssign.Span));
+            // Compute new value
+            LowerExpression(augAssign.Value);
+            _currentBlock.Emit(new IrBinaryOp(MapAugmentedOp(augAssign.Op), fieldType, augAssign.Span));
+            // Store: this.field = result
+            var tempLocal = CreateLocal("<aug_self_tmp>", fieldType);
+            _currentBlock.Emit(new IrStoreLocal(tempLocal.Index, augAssign.Span));
+            _currentBlock.Emit(new IrLoadThis(augAssign.Span));
+            _currentBlock.Emit(new IrLoadLocal(tempLocal.Index, augAssign.Span));
+            _currentBlock.Emit(new IrStoreField(_currentDeclaringType, member.Member, augAssign.Span));
         }
     }
 
@@ -1684,6 +1717,14 @@ public sealed class IrLowering
 
             case MemberAccessExpr member:
             {
+                // self.field → this.field (Python compatibility)
+                if (member.Object is IdentifierExpr { Name: "self" } && _currentDeclaringType is not null)
+                {
+                    _currentBlock.Emit(new IrLoadThis(expr.Span));
+                    _currentBlock.Emit(new IrLoadField(_currentDeclaringType, member.Member, expr.Span));
+                    break;
+                }
+
                 var objType = _typeChecker.ResolvedTypes.TryGetValue(member.Object, out var ot) ? ot : null;
 
                 // Named tuple member access: result.name → array index access

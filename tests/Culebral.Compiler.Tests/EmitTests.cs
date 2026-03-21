@@ -3491,4 +3491,85 @@ public class EmitTests : IDisposable
             """);
         Assert.Equal("ok", output);
     }
+
+    // ─── Python self Compatibility ───
+
+    [Fact]
+    public void Self_SkippedAsFirstParam()
+    {
+        var output = CompileAndRun("""
+            class Counter:
+                count: int = 0
+
+                def __init__(self, initial: int):
+                    self.count = initial
+
+                def increment(self) -> int:
+                    self.count += 1
+                    return self.count
+
+                def get_count(self) -> int:
+                    return self.count
+
+            def main():
+                c = Counter(10)
+                print(c.increment())
+                print(c.increment())
+                print(c.get_count())
+            """);
+        Assert.Equal("11\n12\n12", output);
+    }
+
+    [Fact]
+    public void Self_MixedWithCulebraStyle()
+    {
+        // Uses self for field access + @field for disambiguation + returns
+        var output = CompileAndRun("""
+            class Point:
+                x: int = 0
+                y: int = 0
+
+                def __init__(x: int, y: int):
+                    @x = x
+                    @y = y
+
+                def move_x(self, dx: int) -> int:
+                    self.x = self.x + dx
+                    return self.x
+
+                def move_y(self, dy: int) -> int:
+                    self.y = self.y + dy
+                    return self.y
+
+                def to_string() -> str:
+                    return f"({@x}, {@y})"
+
+            def main():
+                p = Point(1, 2)
+                p.move_x(3)
+                p.move_y(4)
+                print(p.to_string())
+            """);
+        Assert.Equal("(4, 6)", output);
+    }
+
+    [Fact]
+    public void Self_NoSelfAlsoWorks()
+    {
+        var output = CompileAndRun("""
+            class Greeter:
+                name: str = ""
+
+                def __init__(name: str):
+                    @name = name
+
+                def greet() -> str:
+                    return f"Hello, {@name}!"
+
+            def main():
+                g = Greeter("World")
+                print(g.greet())
+            """);
+        Assert.Equal("Hello, World!", output);
+    }
 }

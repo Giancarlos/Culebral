@@ -858,6 +858,10 @@ public sealed class TypeChecker
         if (_narrowedTypes.TryGetValue(ident.Name, out var narrowed))
             return narrowed;
 
+        // 'self' in a class method refers to the current instance (Python compatibility)
+        if (ident.Name == "self")
+            return PrimitiveType.Object;
+
         var symbol = _currentScope.Lookup(ident.Name);
         if (symbol is null)
         {
@@ -1053,6 +1057,14 @@ public sealed class TypeChecker
 
     private CulebralType InferMemberAccess(MemberAccessExpr member)
     {
+        // self.field → resolve as field access on the current class (Python compatibility)
+        if (member.Object is IdentifierExpr { Name: "self" })
+        {
+            var fieldSymbol = _currentScope.Lookup(member.Member);
+            if (fieldSymbol is not null)
+                return fieldSymbol.Type;
+        }
+
         var objType = InferType(member.Object);
 
         // Named tuple member access: result.name → element type at corresponding index
