@@ -13,6 +13,7 @@ public sealed class CulebralParser
     private readonly List<Token> _tokens;
     private readonly DiagnosticBag _diagnostics;
     private int _pos;
+    private bool _inClassBody; // true when parsing methods inside a class/struct/record/interface
 
     public CulebralParser(List<Token> tokens, DiagnosticBag diagnostics)
     {
@@ -146,9 +147,9 @@ public sealed class CulebralParser
         var first = ParseParameter();
         // Silently skip 'self' as first parameter (Python compatibility)
         // self with no type annotation → not a real parameter
-        if (first.Name == "self" && first.Type is SimpleType { Name: "object" })
+        if (first.Name == "self" && first.Type is SimpleType { Name: "object" } && _inClassBody)
         {
-            // Skip it — don't add to parameter list
+            // Skip self from method signature — only in class methods
         }
         else
         {
@@ -180,9 +181,9 @@ public sealed class CulebralParser
         {
             type = ParseTypeAnnotation();
         }
-        else if (name == "self")
+        else if (name == "self" && _inClassBody)
         {
-            // 'self' is the only parameter allowed without a type annotation
+            // 'self' is allowed without a type annotation only in class methods
             type = new SimpleType("object", SourceSpan.From(start));
         }
         else
@@ -300,6 +301,8 @@ public sealed class CulebralParser
 
     private List<AstNode> ParseClassBody()
     {
+        var prev = _inClassBody;
+        _inClassBody = true;
         var members = new List<AstNode>();
         ExpectNewlineAndIndent();
 
@@ -326,6 +329,7 @@ public sealed class CulebralParser
         if (Current.Kind == TokenKind.Dedent)
             Advance();
 
+        _inClassBody = prev;
         return members;
     }
 
