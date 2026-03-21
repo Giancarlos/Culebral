@@ -25,4 +25,10 @@
     <InternalsVisibleTo Include="Culebral.Compiler.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="NuGet.Protocol" Version="6.13.1" />
+    <PackageReference Include="NuGet.Versioning" Version="6.13.1" />
+    <PackageReference Include="NuGet.Frameworks" Version="6.13.1" />
+  </ItemGroup>
+
 </Project>

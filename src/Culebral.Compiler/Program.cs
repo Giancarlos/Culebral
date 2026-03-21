@@ -529,6 +529,7 @@ public static class Program
         var diagnostics = new DiagnosticBag();
 
         // Phase 0: NuGet Resolution (if culebral.toml exists)
+        List<string>? frameworkRefs = null;
         var tomlPath = FindProjectFile(inputPath);
         if (tomlPath is not null)
         {
@@ -537,6 +538,7 @@ public static class Program
             {
                 var nugetResolver = new NuGetResolver(diagnostics);
                 nugetResolver.Resolve(projectFile);
+                frameworkRefs = nugetResolver.GetFrameworkReferences(projectFile);
                 // NuGet errors are non-fatal — compilation continues
                 // with whatever types are already available
             }
@@ -569,6 +571,8 @@ public static class Program
 
         // Phase 5: CIL Emission
         var emitter = new CilEmitter(diagnostics, outputPath);
+        if (frameworkRefs is not null)
+            emitter.FrameworkReferences.AddRange(frameworkRefs);
         var success = emitter.Emit(module);
 
         return new CompilationResult(success, diagnostics);

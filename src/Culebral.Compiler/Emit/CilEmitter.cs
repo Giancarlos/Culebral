@@ -29,6 +29,9 @@ public sealed class CilEmitter
     private readonly HashSet<string> _valueTypeNames = new();
     private MethodBuilder? _entryPointMethod;
 
+    /// <summary>Additional framework references for runtimeconfig.json (e.g., Microsoft.AspNetCore.App).</summary>
+    public List<string> FrameworkReferences { get; } = [];
+
     // PDB debug info: maps method metadata tokens to their sequence points
     private readonly List<MethodDebugInfo> _methodDebugInfos = [];
 
@@ -1197,12 +1200,15 @@ public sealed class CilEmitter
             {
                 if (_methodBuilders.TryGetValue(mname, out var lambdaMb))
                 {
-                    // Build the appropriate Func<> delegate type
-                    // For N params: Func<object, object, ..., object> (N+1 object type args)
-                    var funcTypeArgs = Enumerable.Repeat(typeof(object), paramCount + 1).ToArray();
+                    // Build the Func<> delegate type using the lambda method's actual return type
+                    // instead of always object — this is critical for .NET interop (e.g., ASP.NET
+                    // inspects the delegate signature to determine response serialization)
+                    var returnType = lambdaMb.ReturnType ?? typeof(object);
+                    var paramTypes = Enumerable.Repeat(typeof(object), paramCount).ToArray();
+                    var funcTypeArgs = paramTypes.Append(returnType).ToArray();
                     var delegateType = paramCount switch
                     {
-                        0 => typeof(Func<object>),
+                        0 => typeof(Func<>).MakeGenericType(returnType),
                         1 => typeof(Func<,>).MakeGenericType(funcTypeArgs),
                         2 => typeof(Func<,,>).MakeGenericType(funcTypeArgs),
                         3 => typeof(Func<,,,>).MakeGenericType(funcTypeArgs),
@@ -4696,18 +4702,41 @@ public sealed class CilEmitter
     private void GenerateRuntimeConfig(string assemblyName)
     {
         var configPath = Path.ChangeExtension(_outputPath, ".runtimeconfig.json");
-        var config = $$"""
+
+        if (FrameworkReferences.Count == 0)
         {
-          "runtimeOptions": {
-            "tfm": "net10.0",
-            "framework": {
-              "name": "Microsoft.NETCore.App",
-              "version": "10.0.0"
+            var config = """
+            {
+              "runtimeOptions": {
+                "tfm": "net10.0",
+                "framework": {
+                  "name": "Microsoft.NETCore.App",
+                  "version": "10.0.0"
+                }
+              }
             }
-          }
+            """;
+            File.WriteAllText(configPath, config);
         }
-        """;
-        File.WriteAllText(configPath, config);
+        else
+        {
+            // Multiple frameworks (e.g., ASP.NET)
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("{");
+            sb.AppendLine("  \"runtimeOptions\": {");
+            sb.AppendLine("    \"tfm\": \"net10.0\",");
+            sb.AppendLine("    \"frameworks\": [");
+            sb.AppendLine("      { \"name\": \"Microsoft.NETCore.App\", \"version\": \"10.0.0\" },");
+            for (int i = 0; i < FrameworkReferences.Count; i++)
+            {
+                var comma = i < FrameworkReferences.Count - 1 ? "," : "";
+                sb.AppendLine($"      {{ \"name\": \"{FrameworkReferences[i]}\", \"version\": \"10.0.0\" }}{comma}");
+            }
+            sb.AppendLine("    ]");
+            sb.AppendLine("  }");
+            sb.AppendLine("}");
+            File.WriteAllText(configPath, sb.ToString());
+        }
     }
 
     // ─── Type Resolution ───

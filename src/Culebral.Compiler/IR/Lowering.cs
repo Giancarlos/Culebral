@@ -2987,10 +2987,15 @@ public sealed class IrLowering
         var entryBlock = new IrBasicBlock { Label = NewBlockLabel("lambda_entry") };
         var body = new List<IrBasicBlock> { entryBlock };
 
+        // Infer the lambda body's return type for correct delegate signature
+        // This is critical for .NET interop — ASP.NET inspects delegate return types
+        var bodyType = _typeChecker.ResolvedTypes.TryGetValue(lambda.Body, out var bt) ? bt : PrimitiveType.Object;
+        var returnType = bodyType ?? PrimitiveType.Object;
+
         var irFunc = new IrFunction
         {
             Name = lambdaName,
-            ReturnType = PrimitiveType.Object,
+            ReturnType = returnType,
             Parameters = parameters,
             Body = body,
             IsStatic = true,
@@ -3009,11 +3014,6 @@ public sealed class IrLowering
 
         // Lower the lambda body expression
         LowerExpression(lambda.Body);
-
-        // Box value types so the return is always object
-        var bodyType = _typeChecker.ResolvedTypes.TryGetValue(lambda.Body, out var bt) ? bt : null;
-        if (bodyType is PrimitiveType pt && pt.ClrType is not null && pt.ClrType.IsValueType)
-            _currentBlock.Emit(new IrBox(pt, lambda.Span));
 
         _currentBlock.Emit(new IrReturn(true, lambda.Span));
 

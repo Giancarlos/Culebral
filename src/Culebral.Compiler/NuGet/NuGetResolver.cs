@@ -1,19 +1,30 @@
-using System.Diagnostics;
 using System.Reflection;
-using System.Text;
-using System.Text.Json;
 using Culebral.Compiler.Diagnostics;
+using NuGet.Common;
+using NuGet.Frameworks;
+using NuGet.Packaging;
+using NuGet.Protocol;
+using NuGet.Protocol.Core.Types;
+using NuGet.Versioning;
 
 namespace Culebral.Compiler.NuGet;
 
 /// <summary>
-/// Resolves NuGet packages by generating a temporary .csproj, running dotnet restore,
-/// and loading the resolved assemblies for compile-time type resolution.
+/// Resolves NuGet packages using the official NuGet client libraries.
+/// Downloads missing packages from nuget.org, caches in the global NuGet folder,
+/// and loads resolved assemblies for compile-time type resolution.
+///
+/// Framework references (e.g., Microsoft.AspNetCore.App) are resolved from
+/// the .NET shared runtime installation — they are NOT NuGet packages.
 /// </summary>
 public sealed class NuGetResolver
 {
     private readonly DiagnosticBag _diagnostics;
     private readonly List<string> _resolvedAssemblyPaths = [];
+
+    private static readonly string NuGetV3Feed = "https://api.nuget.org/v3/index.json";
+    private static readonly string GlobalPackagesFolder =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
 
     /// <summary>Paths to resolved NuGet package assemblies.</summary>
     public IReadOnlyList<string> ResolvedAssemblyPaths => _resolvedAssemblyPaths;
@@ -25,36 +36,30 @@ public sealed class NuGetResolver
 
     /// <summary>
     /// Resolve NuGet packages from a culebral.toml project file.
-    /// Generates a temp .csproj, runs dotnet restore, and discovers assembly paths.
+    /// Uses NuGet client libraries to resolve versions, download packages,
+    /// and discover compile-time assemblies. No subprocess spawning.
     /// </summary>
     public bool Resolve(ProjectFileParser projectFile)
     {
         if (projectFile.Dependencies.Count == 0)
             return true;
 
-        var tempDir = Path.Combine(Path.GetTempPath(), $"culebral_nuget_{Guid.NewGuid():N}");
         try
         {
-            Directory.CreateDirectory(tempDir);
+            var tfm = NuGetFramework.Parse(projectFile.TargetFramework);
 
-            // Generate temporary .csproj with package references
-            var csprojPath = Path.Combine(tempDir, "resolve.csproj");
-            GenerateCsproj(csprojPath, projectFile);
-
-            // Run dotnet restore
-            if (!RunDotNetRestore(csprojPath, tempDir))
-                return false;
-
-            // Parse the assets file to find resolved assembly paths
-            var assetsPath = Path.Combine(tempDir, "obj", "project.assets.json");
-            if (!File.Exists(assetsPath))
+            // Resolve framework references from the .NET shared runtime
+            foreach (var dep in projectFile.Dependencies.Where(d => d.IsFrameworkReference))
             {
-                _diagnostics.Error("LEB5001", "NuGet restore did not produce an assets file",
-                    new SourceSpan(default, default));
-                return false;
+                ResolveFrameworkReference(dep.PackageId);
             }
 
-            DiscoverAssemblyPaths(assetsPath, projectFile.TargetFramework);
+            // Resolve NuGet packages
+            var nugetDeps = projectFile.Dependencies.Where(d => !d.IsFrameworkReference).ToList();
+            if (nugetDeps.Count > 0)
+            {
+                ResolvePackagesAsync(nugetDeps, tfm).GetAwaiter().GetResult();
+            }
 
             // Load resolved assemblies into the runtime for type resolution
             foreach (var asmPath in _resolvedAssemblyPaths)
@@ -79,10 +84,6 @@ public sealed class NuGetResolver
                 new SourceSpan(default, default));
             return false;
         }
-        finally
-        {
-            try { Directory.Delete(tempDir, true); } catch { }
-        }
     }
 
     /// <summary>Generate package reference entries for .runtimeconfig.json.</summary>
@@ -94,138 +95,351 @@ public sealed class NuGetResolver
             .ToList();
     }
 
-    private static void GenerateCsproj(string path, ProjectFileParser projectFile)
+    /// <summary>
+    /// Resolve NuGet packages using the NuGet.Protocol client libraries.
+    /// Checks the global cache first, downloads from nuget.org if missing.
+    /// </summary>
+    private async Task ResolvePackagesAsync(List<PackageReference> packages, NuGetFramework tfm)
     {
-        var sb = new StringBuilder();
-        sb.AppendLine("<Project Sdk=\"Microsoft.NET.Sdk\">");
-        sb.AppendLine("  <PropertyGroup>");
-        sb.AppendLine($"    <TargetFramework>{projectFile.TargetFramework}</TargetFramework>");
-        sb.AppendLine("    <OutputType>Library</OutputType>");
-        sb.AppendLine("  </PropertyGroup>");
-        sb.AppendLine("  <ItemGroup>");
+        var repository = Repository.Factory.GetCoreV3(NuGetV3Feed);
+        var resource = await repository.GetResourceAsync<FindPackageByIdResource>();
+        using var cacheContext = new SourceCacheContext();
+        var logger = NullLogger.Instance;
+        var cts = new CancellationTokenSource(TimeSpan.FromSeconds(120));
 
-        foreach (var dep in projectFile.Dependencies)
+        foreach (var pkg in packages)
         {
-            if (dep.IsFrameworkReference)
+            try
             {
-                sb.AppendLine($"    <FrameworkReference Include=\"{dep.PackageId}\" />");
+                await ResolvePackageAsync(pkg, tfm, resource, cacheContext, logger, cts.Token);
             }
-            else
+            catch (OperationCanceledException)
             {
-                sb.AppendLine($"    <PackageReference Include=\"{dep.PackageId}\" Version=\"{dep.Version}\" />");
+                _diagnostics.Error("LEB5004",
+                    $"NuGet resolution timed out for package '{pkg.PackageId}'",
+                    new SourceSpan(default, default));
+            }
+            catch (Exception ex)
+            {
+                _diagnostics.Error("LEB5001",
+                    $"Failed to resolve package '{pkg.PackageId}' version '{pkg.Version}': {ex.Message}",
+                    new SourceSpan(default, default));
             }
         }
-
-        sb.AppendLine("  </ItemGroup>");
-        sb.AppendLine("</Project>");
-
-        File.WriteAllText(path, sb.ToString());
     }
 
-    private bool RunDotNetRestore(string csprojPath, string workingDir)
+    private async Task ResolvePackageAsync(
+        PackageReference pkg,
+        NuGetFramework tfm,
+        FindPackageByIdResource resource,
+        SourceCacheContext cacheContext,
+        ILogger logger,
+        CancellationToken ct)
     {
-        var psi = new ProcessStartInfo
+        // Resolve the version
+        var resolvedVersion = await ResolveVersionAsync(pkg, resource, cacheContext, logger, ct);
+        if (resolvedVersion is null)
         {
-            FileName = "dotnet",
-            Arguments = $"restore \"{csprojPath}\" --verbosity quiet",
-            WorkingDirectory = workingDir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-
-        using var process = Process.Start(psi);
-        if (process is null)
-        {
-            _diagnostics.Error("LEB5003", "Failed to start 'dotnet restore'",
+            _diagnostics.Error("LEB5005",
+                $"Could not resolve version '{pkg.Version}' for package '{pkg.PackageId}'",
                 new SourceSpan(default, default));
-            return false;
+            return;
         }
 
-        process.WaitForExit(60_000); // 60 second timeout
+        // Check global cache first
+        var packageDir = Path.Combine(GlobalPackagesFolder,
+            pkg.PackageId.ToLowerInvariant(), resolvedVersion.ToNormalizedString());
 
-        if (!process.HasExited)
+        if (!Directory.Exists(packageDir))
         {
-            process.Kill(true);
-            _diagnostics.Error("LEB5004", "NuGet restore timed out after 60 seconds",
-                new SourceSpan(default, default));
-            return false;
+            // Download from nuget.org
+            await DownloadPackageAsync(pkg.PackageId, resolvedVersion, resource, cacheContext, logger, ct);
         }
 
-        if (process.ExitCode != 0)
-        {
-            var stderr = process.StandardError.ReadToEnd();
-            _diagnostics.Error("LEB5005", $"NuGet restore failed: {stderr.Trim()}",
-                new SourceSpan(default, default));
-            return false;
-        }
-
-        return true;
+        // Extract compile-time assembly paths from the cached package
+        DiscoverCompileAssemblies(pkg.PackageId, resolvedVersion, tfm);
     }
 
-    private void DiscoverAssemblyPaths(string assetsPath, string targetFramework)
+    /// <summary>
+    /// Resolve the concrete version for a package. Supports exact versions and wildcard (*).
+    /// </summary>
+    private static async Task<NuGetVersion?> ResolveVersionAsync(
+        PackageReference pkg,
+        FindPackageByIdResource resource,
+        SourceCacheContext cacheContext,
+        ILogger logger,
+        CancellationToken ct)
     {
-        try
+        if (pkg.Version == "*")
         {
-            var json = File.ReadAllText(assetsPath);
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            // Get the NuGet global packages folder
-            var packageFolders = root.GetProperty("packageFolders");
-            var nugetDir = packageFolders.EnumerateObject().FirstOrDefault().Name;
-
-            if (string.IsNullOrEmpty(nugetDir))
-                return;
-
-            // Navigate to targets → target framework
-            if (!root.TryGetProperty("targets", out var targets))
-                return;
-
-            // Find the matching target framework (e.g., "net10.0")
-            JsonElement? targetSection = null;
-            foreach (var target in targets.EnumerateObject())
-            {
-                if (target.Name.Contains(targetFramework, StringComparison.OrdinalIgnoreCase))
-                {
-                    targetSection = target.Value;
-                    break;
-                }
-            }
-
-            if (targetSection is null)
-                return;
-
-            // Enumerate each package and find its compile-time assemblies
-            foreach (var package in targetSection.Value.EnumerateObject())
-            {
-                if (!package.Value.TryGetProperty("compile", out var compile))
-                    continue;
-
-                var packageParts = package.Name.Split('/');
-                if (packageParts.Length != 2) continue;
-
-                var packageId = packageParts[0];
-                var packageVersion = packageParts[1];
-
-                foreach (var assembly in compile.EnumerateObject())
-                {
-                    var relativePath = assembly.Name;
-                    if (relativePath.EndsWith("_._")) continue; // Placeholder, not a real assembly
-
-                    var fullPath = Path.Combine(nugetDir, packageId.ToLowerInvariant(),
-                        packageVersion, relativePath.Replace('/', Path.DirectorySeparatorChar));
-
-                    if (File.Exists(fullPath))
-                        _resolvedAssemblyPaths.Add(fullPath);
-                }
-            }
+            // Get latest stable version
+            var versions = await resource.GetAllVersionsAsync(pkg.PackageId, cacheContext, logger, ct);
+            return versions
+                .Where(v => !v.IsPrerelease)
+                .OrderByDescending(v => v)
+                .FirstOrDefault()
+                ?? versions.OrderByDescending(v => v).FirstOrDefault();
         }
-        catch (Exception ex)
+
+        // Try parsing as an exact version first
+        if (NuGetVersion.TryParse(pkg.Version, out var exactVersion))
+        {
+            // Verify the version exists
+            var exists = await resource.DoesPackageExistAsync(
+                pkg.PackageId, exactVersion, cacheContext, logger, ct);
+            if (exists)
+                return exactVersion;
+
+            // If exact version doesn't exist, return null
+            return null;
+        }
+
+        // Try parsing as a version range (e.g., "[1.0,2.0)")
+        if (VersionRange.TryParse(pkg.Version, out var versionRange))
+        {
+            var versions = await resource.GetAllVersionsAsync(pkg.PackageId, cacheContext, logger, ct);
+            return versionRange.FindBestMatch(versions);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Download a package from nuget.org and extract it into the global packages folder.
+    /// </summary>
+    private async Task DownloadPackageAsync(
+        string packageId,
+        NuGetVersion version,
+        FindPackageByIdResource resource,
+        SourceCacheContext cacheContext,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        using var packageStream = new MemoryStream();
+        var success = await resource.CopyNupkgToStreamAsync(
+            packageId, version, packageStream, cacheContext, logger, ct);
+
+        if (!success)
+        {
+            _diagnostics.Error("LEB5003",
+                $"Failed to download package '{packageId}' version '{version}'",
+                new SourceSpan(default, default));
+            return;
+        }
+
+        // Extract the nupkg into the global packages folder
+        packageStream.Position = 0;
+        var targetDir = Path.Combine(GlobalPackagesFolder,
+            packageId.ToLowerInvariant(), version.ToNormalizedString());
+
+        Directory.CreateDirectory(targetDir);
+
+        using var reader = new PackageArchiveReader(packageStream);
+        var files = await reader.GetFilesAsync(ct);
+
+        foreach (var file in files)
+        {
+            // Skip directories and content types
+            if (file.EndsWith("/") || file == "[Content_Types].xml" || file.StartsWith("_rels/"))
+                continue;
+
+            var targetPath = Path.Combine(targetDir, file.Replace('/', Path.DirectorySeparatorChar));
+            var dir = Path.GetDirectoryName(targetPath);
+            if (dir is not null)
+                Directory.CreateDirectory(dir);
+
+            using var entryStream = await reader.GetStreamAsync(file, ct);
+            using var fileStream = File.Create(targetPath);
+            await entryStream.CopyToAsync(fileStream, ct);
+        }
+
+        // Write the .nupkg.metadata file that NuGet expects
+        var metadataPath = Path.Combine(targetDir, ".nupkg.metadata");
+        await File.WriteAllTextAsync(metadataPath,
+            $$"""{"version":2,"contentHash":"","source":"https://api.nuget.org/v3/index.json"}""", ct);
+    }
+
+    /// <summary>
+    /// Discover compile-time assemblies from a cached NuGet package.
+    /// Looks in lib/{tfm}/ directories for the best matching framework.
+    /// </summary>
+    private void DiscoverCompileAssemblies(string packageId, NuGetVersion version, NuGetFramework tfm)
+    {
+        var packageDir = Path.Combine(GlobalPackagesFolder,
+            packageId.ToLowerInvariant(), version.ToNormalizedString());
+
+        if (!Directory.Exists(packageDir))
         {
             _diagnostics.Warning("LEB5006",
-                $"Failed to parse NuGet assets file: {ex.Message}",
+                $"Package directory not found: {packageDir}",
+                new SourceSpan(default, default));
+            return;
+        }
+
+        // Look for compile-time assemblies in ref/ first, then lib/
+        var refDir = Path.Combine(packageDir, "ref");
+        var libDir = Path.Combine(packageDir, "lib");
+
+        var assembliesFound = false;
+
+        // Prefer ref/ assemblies (reference assemblies for compilation)
+        if (Directory.Exists(refDir))
+        {
+            assembliesFound = DiscoverAssembliesInFrameworkDirs(refDir, tfm);
+        }
+
+        // Fall back to lib/ assemblies
+        if (!assembliesFound && Directory.Exists(libDir))
+        {
+            assembliesFound = DiscoverAssembliesInFrameworkDirs(libDir, tfm);
+        }
+
+        if (!assembliesFound)
+        {
+            _diagnostics.Warning("LEB5006",
+                $"No compile-time assemblies found for '{packageId}' {version} targeting {tfm.GetShortFolderName()}",
                 new SourceSpan(default, default));
         }
+    }
+
+    /// <summary>
+    /// Scan framework subdirectories (e.g., lib/net10.0/, lib/net8.0/) to find
+    /// the best-matching TFM directory and add all DLLs from it.
+    /// </summary>
+    private bool DiscoverAssembliesInFrameworkDirs(string baseDir, NuGetFramework tfm)
+    {
+        var frameworkDirs = new List<(NuGetFramework framework, string path)>();
+
+        foreach (var dir in Directory.GetDirectories(baseDir))
+        {
+            var dirName = Path.GetFileName(dir);
+            var framework = NuGetFramework.Parse(dirName);
+            if (framework.IsSpecificFramework)
+            {
+                frameworkDirs.Add((framework, dir));
+            }
+        }
+
+        if (frameworkDirs.Count == 0)
+            return false;
+
+        // Use NuGet's framework reducer to find the best match
+        var reducer = new FrameworkReducer();
+        var frameworks = frameworkDirs.Select(f => f.framework).ToList();
+        var nearest = reducer.GetNearest(tfm, frameworks);
+
+        if (nearest is null)
+            return false;
+
+        var bestDir = frameworkDirs.First(f => f.framework.Equals(nearest)).path;
+        var dlls = Directory.GetFiles(bestDir, "*.dll");
+
+        foreach (var dll in dlls)
+        {
+            _resolvedAssemblyPaths.Add(dll);
+        }
+
+        return dlls.Length > 0;
+    }
+
+    /// <summary>
+    /// Resolve a framework reference (e.g., Microsoft.AspNetCore.App) from the .NET shared runtime.
+    /// Framework references ship with the .NET runtime and are NOT NuGet packages.
+    /// </summary>
+    private void ResolveFrameworkReference(string frameworkName)
+    {
+        var runtimePath = DiscoverSharedRuntimePath(frameworkName);
+        if (runtimePath is null)
+        {
+            _diagnostics.Warning("LEB5007",
+                $"Could not locate shared runtime for framework reference '{frameworkName}'. " +
+                $"Ensure the .NET runtime includes '{frameworkName}'.",
+                new SourceSpan(default, default));
+            return;
+        }
+
+        foreach (var dll in Directory.GetFiles(runtimePath, "*.dll"))
+        {
+            try
+            {
+                Assembly.LoadFrom(dll);
+            }
+            catch
+            {
+                // Non-fatal — some DLLs may be native-only or otherwise incompatible
+            }
+        }
+    }
+
+    /// <summary>
+    /// Discover the shared runtime path for a framework reference.
+    /// Uses runtime introspection to find the .NET installation directory,
+    /// then navigates to the correct shared framework directory.
+    /// No subprocess spawning.
+    /// </summary>
+    private static string? DiscoverSharedRuntimePath(string frameworkName)
+    {
+        // The running .NET runtime tells us where it's installed.
+        // typeof(object).Assembly.Location gives us something like:
+        //   /usr/share/dotnet/shared/Microsoft.NETCore.App/10.0.4/System.Private.CoreLib.dll
+        var coreLibPath = typeof(object).Assembly.Location;
+        if (string.IsNullOrEmpty(coreLibPath))
+            return null;
+
+        // Navigate: /usr/share/dotnet/shared/Microsoft.NETCore.App/10.0.4/
+        var coreAppVersionDir = Path.GetDirectoryName(coreLibPath);
+        if (coreAppVersionDir is null)
+            return null;
+
+        // Navigate: /usr/share/dotnet/shared/Microsoft.NETCore.App/
+        var coreAppDir = Path.GetDirectoryName(coreAppVersionDir);
+        if (coreAppDir is null)
+            return null;
+
+        // Navigate: /usr/share/dotnet/shared/
+        var sharedDir = Path.GetDirectoryName(coreAppDir);
+        if (sharedDir is null)
+            return null;
+
+        // The version we're running (e.g., "10.0.4")
+        var runtimeVersion = Path.GetFileName(coreAppVersionDir);
+
+        // If the framework is Microsoft.NETCore.App, we already have the path
+        if (frameworkName == "Microsoft.NETCore.App")
+            return coreAppVersionDir;
+
+        // For other frameworks (e.g., Microsoft.AspNetCore.App),
+        // look in /usr/share/dotnet/shared/{frameworkName}/{version}/
+        var frameworkVersionDir = Path.Combine(sharedDir, frameworkName, runtimeVersion!);
+        if (Directory.Exists(frameworkVersionDir))
+            return frameworkVersionDir;
+
+        // If exact version doesn't match, find the best matching version
+        var frameworkDir = Path.Combine(sharedDir, frameworkName);
+        if (!Directory.Exists(frameworkDir))
+            return null;
+
+        // Find the highest version directory that shares the same major.minor
+        var runtimeVer = NuGetVersion.Parse(runtimeVersion!);
+        string? bestPath = null;
+        NuGetVersion? bestVersion = null;
+
+        foreach (var versionDir in Directory.GetDirectories(frameworkDir))
+        {
+            var dirName = Path.GetFileName(versionDir);
+            if (!NuGetVersion.TryParse(dirName, out var ver))
+                continue;
+
+            if (ver.Major == runtimeVer.Major && ver.Minor == runtimeVer.Minor)
+            {
+                if (bestVersion is null || ver > bestVersion)
+                {
+                    bestVersion = ver;
+                    bestPath = versionDir;
+                }
+            }
+        }
+
+        return bestPath;
     }
 }
