@@ -2870,7 +2870,7 @@ public class EmitTests : IDisposable
         Assert.Equal("0", output);
     }
 
-    [Fact(Skip = "set is a keyword in the parser (used for property setters); set() builtin requires parser changes")]
+    [Fact]
     public void Set_FromList()
     {
         var output = CompileAndRun("""

@@ -1455,6 +1455,8 @@ public sealed class CulebralParser
 
             case TokenKind.Identifier:
             case TokenKind.KwType:
+            case TokenKind.KwSet:  // soft keyword — identifier in expression context
+            case TokenKind.KwGet:  // soft keyword — identifier in expression context
                 Advance();
                 return new IdentifierExpr(tok.Lexeme, tok.Span);
 

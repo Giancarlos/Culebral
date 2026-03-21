@@ -1893,11 +1893,24 @@ public sealed class CilEmitter
                 }
                 else
                 {
-                    // For List<> and other ICollection types — cast to ICollection first
-                    // so the IL verifier accepts the callvirt when the stack type is object
+                    // For collections where the static type is object:
+                    // Try ICollection<object> first (List, HashSet), fall back to ICollection (Dictionary)
+                    var countLocal = il.DeclareLocal(typeof(object));
+                    il.Emit(OpCodes.Stloc, countLocal);
+                    il.Emit(OpCodes.Ldloc, countLocal);
+                    il.Emit(OpCodes.Isinst, typeof(ICollection<object>));
+                    var tryNonGeneric = il.DefineLabel();
+                    var gotCount = il.DefineLabel();
+                    il.Emit(OpCodes.Dup);
+                    il.Emit(OpCodes.Brfalse, tryNonGeneric);
+                    il.Emit(OpCodes.Callvirt, typeof(ICollection<object>).GetProperty("Count")!.GetGetMethod()!);
+                    il.Emit(OpCodes.Br, gotCount);
+                    il.MarkLabel(tryNonGeneric);
+                    il.Emit(OpCodes.Pop); // pop null from failed isinst
+                    il.Emit(OpCodes.Ldloc, countLocal);
                     il.Emit(OpCodes.Castclass, typeof(System.Collections.ICollection));
-                    il.Emit(OpCodes.Callvirt,
-                        typeof(System.Collections.ICollection).GetProperty("Count")!.GetGetMethod()!);
+                    il.Emit(OpCodes.Callvirt, typeof(System.Collections.ICollection).GetProperty("Count")!.GetGetMethod()!);
+                    il.MarkLabel(gotCount);
                 }
                 break;
             }
@@ -2653,13 +2666,24 @@ public sealed class CilEmitter
                 hil.Emit(OpCodes.Ldc_I4_0);
                 hil.Emit(OpCodes.Ret);
 
-                // if (value is ICollection c) return c.Count > 0
+                // if (value is ICollection<object> or ICollection) return Count > 0
                 hil.MarkLabel(checkCollection);
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Isinst, typeof(ICollection<object>));
+                hil.Emit(OpCodes.Dup);
+                var tryNonGenericCol = hil.DefineLabel();
+                hil.Emit(OpCodes.Brfalse, tryNonGenericCol);
+                hil.Emit(OpCodes.Callvirt, typeof(ICollection<object>).GetProperty("Count")!.GetGetMethod()!);
+                var gotTruthCount = hil.DefineLabel();
+                hil.Emit(OpCodes.Br, gotTruthCount);
+                hil.MarkLabel(tryNonGenericCol);
+                hil.Emit(OpCodes.Pop);
                 hil.Emit(OpCodes.Ldarg_0);
                 hil.Emit(OpCodes.Isinst, typeof(System.Collections.ICollection));
                 hil.Emit(OpCodes.Dup);
-                hil.Emit(OpCodes.Brfalse, returnTrue);
+                hil.Emit(OpCodes.Brfalse, returnTrue); // not a collection at all → truthy
                 hil.Emit(OpCodes.Callvirt, typeof(System.Collections.ICollection).GetProperty("Count")!.GetGetMethod()!);
+                hil.MarkLabel(gotTruthCount);
                 hil.Emit(OpCodes.Ldc_I4_0);
                 hil.Emit(OpCodes.Cgt);
                 hil.Emit(OpCodes.Ret);
