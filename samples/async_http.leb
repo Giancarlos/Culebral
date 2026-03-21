@@ -1,0 +1,21 @@
+# Async HTTP — fetch data from the web using HttpClient.
+#
+# Culebral's async/await maps to real .NET Tasks with state machines.
+# This example fetches a URL without blocking the thread.
+#
+# Requires network access. Run with: culebral run samples/async_http.leb
+
+from System.Net.Http import HttpClient
+from System.Threading.Tasks import Task
+
+async def fetch(url: str) -> str:
+    client = HttpClient()
+    response = await client.get_string_async(url)
+    return response
+
+async def main():
+    # Fetch a simple text endpoint
+    body = await fetch("https://httpbin.org/get")
+    print(f"Response length: {len(body)} characters")
+    print("First 200 chars:")
+    print(body[0:200])

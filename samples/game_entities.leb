@@ -1,0 +1,86 @@
+# Game Entities — a simple entity system showcasing classes, interfaces,
+# pattern matching, and operator overloading.
+#
+# This is the kind of code you'd write when embedding Culebral as a
+# scripting language in a game engine.
+#
+# Run with: culebral run samples/game_entities.leb
+
+interface Damageable:
+    def take_damage(amount: int)
+    def is_alive() -> bool
+
+class Vector2:
+    x: float = 0.0
+    y: float = 0.0
+
+    def __init__(x: float, y: float):
+        @x = x
+        @y = y
+
+    def __add__(other: Vector2) -> Vector2:
+        return Vector2(@x + other.x, @y + other.y)
+
+    def __str__() -> str:
+        return f"({@x}, {@y})"
+
+class Entity(Damageable):
+    name: str = ""
+    hp: int = 100
+    max_hp: int = 100
+    position: Vector2
+
+    def __init__(name: str, hp: int, x: float, y: float):
+        @name = name
+        @hp = hp
+        @max_hp = hp
+        @position = Vector2(x, y)
+
+    def take_damage(amount: int):
+        @hp = @hp - amount
+        if @hp < 0:
+            @hp = 0
+        print(f"  {name} takes {amount} damage! HP: {hp}/{max_hp}")
+
+    def is_alive() -> bool:
+        return @hp > 0
+
+    def heal(amount: int):
+        @hp = @hp + amount
+        if @hp > @max_hp:
+            @hp = @max_hp
+        print(f"  {name} heals {amount}! HP: {hp}/{max_hp}")
+
+    def __str__() -> str:
+        status = "alive" if @hp > 0 else "dead"
+        return f"{name} [{status}] HP:{hp}/{max_hp} at {position}"
+
+def main():
+    # Create entities
+    hero = Entity("Hero", 100, 0.0, 0.0)
+    goblin = Entity("Goblin", 30, 5.0, 3.0)
+
+    print("=== Battle Start ===")
+    print(hero)
+    print(goblin)
+    print()
+
+    # Combat round
+    print("Hero attacks Goblin!")
+    goblin.take_damage(25)
+
+    print("Goblin attacks Hero!")
+    hero.take_damage(10)
+
+    print("Hero attacks Goblin!")
+    goblin.take_damage(15)
+
+    print()
+    print("=== Battle End ===")
+    print(hero)
+    print(goblin)
+
+    if hero.is_alive():
+        print(f"{hero.name} wins!")
+    else:
+        print(f"{goblin.name} wins!")

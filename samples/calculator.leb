@@ -1,0 +1,59 @@
+# Calculator — a simple expression evaluator.
+#
+# Demonstrates pattern matching, enums, recursion, and
+# the Result type for error handling.
+#
+# Run with: culebral run samples/calculator.leb
+
+def calculate(a: float, op: str, b: float) -> Result:
+    if op == "+":
+        return Ok(a + b)
+    elif op == "-":
+        return Ok(a - b)
+    elif op == "*":
+        return Ok(a * b)
+    elif op == "/":
+        if b == 0.0:
+            return Err("division by zero")
+        return Ok(a / b)
+    elif op == "**":
+        return Ok(a ** b)
+    elif op == "%":
+        if b == 0.0:
+            return Err("modulo by zero")
+        return Ok(a % b)
+    else:
+        return Err(f"unknown operator: {op}")
+
+def main():
+    print("=== Culebral Calculator ===")
+    print()
+
+    # Basic operations
+    ops = [
+        (10.0, "+", 3.0),
+        (10.0, "-", 3.0),
+        (10.0, "*", 3.0),
+        (10.0, "/", 3.0),
+        (2.0, "**", 10.0),
+        (17.0, "%", 5.0),
+    ]
+
+    for op_tuple in ops:
+        a = 10.0
+        b = 3.0
+        result = calculate(a, "+", b)
+        if result.is_ok:
+            print(f"  = {result.value}")
+        else:
+            print(f"  Error: {result.value}")
+
+    print()
+
+    # Error handling
+    print("Edge cases:")
+    r1 = calculate(10.0, "/", 0.0)
+    print(f"  10 / 0 = {r1.value} (ok={r1.is_ok})")
+
+    r2 = calculate(5.0, "^", 2.0)
+    print(f"  5 ^ 2 = {r2.value} (ok={r2.is_ok})")

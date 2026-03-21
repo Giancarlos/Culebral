@@ -1,0 +1,30 @@
+# File I/O — read and write files using .NET's System.IO.
+#
+# The 'with' statement ensures files are properly closed,
+# even if an exception occurs (maps to IDisposable/try-finally).
+#
+# Run with: culebral run samples/file_io.leb
+
+from System.IO import File, Path, StreamReader, StreamWriter
+
+def main():
+    # Write to a temp file
+    temp = Path.combine(Path.get_temp_path(), "culebral_demo.txt")
+    File.write_all_text(temp, "Line 1\nLine 2\nLine 3\n")
+    print(f"Wrote to: {temp}")
+
+    # Read it back
+    content = File.read_all_text(temp)
+    print("Contents:")
+    print(content)
+
+    # Read with 'with' statement (auto-closes the stream)
+    with StreamReader(temp) as reader:
+        line = reader.read_line()
+        while line is not None:
+            print(f"  > {line}")
+            line = reader.read_line()
+
+    # Clean up
+    File.delete(temp)
+    print("Cleaned up.")

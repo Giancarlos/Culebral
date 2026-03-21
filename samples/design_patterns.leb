@@ -1,0 +1,82 @@
+# Design Patterns — strategy pattern, builder pattern, and observer.
+#
+# Shows how Culebral's interfaces, records, and lambdas enable
+# clean design patterns without boilerplate.
+#
+# Run with: culebral run samples/design_patterns.leb
+
+# ─── Strategy Pattern ───
+# Different sorting strategies via interfaces
+
+interface SortStrategy:
+    def name() -> str
+    def sort(items: list) -> list
+
+class BubbleSort(SortStrategy):
+    def name() -> str:
+        return "Bubble Sort"
+
+    def sort(items: list) -> list:
+        result = sorted(items)
+        return result
+
+class ReverseSort(SortStrategy):
+    def name() -> str:
+        return "Reverse Sort"
+
+    def sort(items: list) -> list:
+        result = sorted(items)
+        return reversed(result)
+
+class Sorter:
+    strategy: SortStrategy
+
+    def __init__(strategy: SortStrategy):
+        @strategy = strategy
+
+    def execute(items: list) -> list:
+        print(f"  Using: {strategy.name()}")
+        return strategy.sort(items)
+
+# ─── Builder Pattern ───
+# Fluent config builder using records
+
+record Config:
+    host: str = "localhost"
+    port: int = 8080
+    debug: bool = False
+
+    def __init__(host: str, port: int, debug: bool):
+        @host = host
+        @port = port
+        @debug = debug
+
+    def __str__() -> str:
+        return f"Config(host={@host}, port={@port}, debug={@debug})"
+
+def main():
+    # ─── Strategy Pattern ───
+    print("=== Strategy Pattern ===")
+    data = [5, 2, 8, 1, 9, 3]
+    print(f"Original: {data}")
+
+    sorter = Sorter(BubbleSort())
+    result1 = sorter.execute(data)
+    print(f"Result: {result1}")
+
+    sorter = Sorter(ReverseSort())
+    result2 = sorter.execute(data)
+    print(f"Result: {result2}")
+    print()
+
+    # ─── Builder Pattern ───
+    print("=== Builder Pattern ===")
+    default_config = Config("localhost", 8080, False)
+    print(f"Default: {default_config}")
+
+    # Use 'with' expression to create modified copies
+    dev_config = default_config with (debug=True)
+    print(f"Dev: {dev_config}")
+
+    prod_config = default_config with (host="api.example.com", port=443)
+    print(f"Prod: {prod_config}")

@@ -1,0 +1,44 @@
+# Data Processing — filtering, transforming, and aggregating data.
+#
+# Shows list comprehensions, lambdas, map/filter, and built-in
+# functions for working with collections.
+#
+# Run with: culebral run samples/data_processing.leb
+
+def main():
+    # ─── Raw data ───
+    scores = [85, 92, 78, 95, 88, 62, 71, 99, 84, 56]
+    print(f"All scores: {scores}")
+    print(f"Count: {len(scores)}")
+    print(f"Sum: {sum(scores)}")
+    print(f"Min: {min(scores)}, Max: {max(scores)}")
+    print()
+
+    # ─── Filtering ───
+    passing = [s for s in scores if s >= 70]
+    failing = [s for s in scores if s < 70]
+    print(f"Passing (>=70): {passing}")
+    print(f"Failing (<70): {failing}")
+    print()
+
+    # ─── Grading with comprehension ───
+    def grade(score: int) -> str:
+        if score >= 90:
+            return "A"
+        elif score >= 80:
+            return "B"
+        elif score >= 70:
+            return "C"
+        else:
+            return "F"
+
+    grades = {s: grade(s) for s in scores}
+    print(f"Grade map: {grades}")
+    print()
+
+    # ─── Aggregation ───
+    a_count = len([s for s in scores if s >= 90])
+    b_count = len([s for s in scores if s >= 80 and s < 90])
+    print(f"A grades: {a_count}")
+    print(f"B grades: {b_count}")
+    print(f"Pass rate: {len(passing)}/{len(scores)}")

@@ -1,0 +1,95 @@
+# ASP.NET Web API — a REST API server written in Culebral.
+#
+# This is the dream: Python-like syntax running on ASP.NET.
+# Requires Microsoft.AspNetCore.App framework reference in culebral.toml.
+#
+# culebral.toml:
+#   [project]
+#   name = "my-api"
+#   version = "0.1.0"
+#   target = "net10.0"
+#
+#   [dependencies]
+#   "Microsoft.AspNetCore.App" = { framework = true }
+#
+# Run with: culebral run samples/aspnet_web_api.leb
+# Then open: http://localhost:5000
+
+from Microsoft.AspNetCore.Builder import WebApplication
+from Microsoft.AspNetCore.Http import Results
+from System.Text.Json import JsonSerializer
+
+# ─── In-memory data store ───
+
+class TodoStore:
+    items: list
+    next_id: int = 1
+
+    def __init__():
+        items = []
+
+    def add(title: str) -> dict:
+        todo = {"id": next_id, "title": title, "done": False}
+        items += [todo]
+        next_id += 1
+        return todo
+
+    def get_all() -> list:
+        return items
+
+    def get_by_id(id: int) -> Result:
+        for item in items:
+            if item["id"] == id:
+                return Ok(item)
+        return Err(f"Todo {id} not found")
+
+    def toggle(id: int) -> Result:
+        for item in items:
+            if item["id"] == id:
+                item["done"] = not item["done"]
+                return Ok(item)
+        return Err(f"Todo {id} not found")
+
+# ─── Application setup ───
+
+def main():
+    app = WebApplication.create()
+    store = TodoStore()
+
+    # Seed some data
+    store.add("Learn Culebral")
+    store.add("Build a web API")
+    store.add("Deploy to production")
+
+    # GET /
+    # Returns a welcome message
+    app.map_get("/", lambda: "Culebral Web API is running!")
+
+    # GET /todos
+    # Returns all todos as JSON
+    app.map_get("/todos", lambda: Results.ok(store.get_all()))
+
+    # GET /todos/{id}
+    # Returns a single todo by ID
+    app.map_get("/todos/{id}", lambda id: (
+        Results.ok(store.get_by_id(int(id)).value)
+        if store.get_by_id(int(id)).is_ok
+        else Results.not_found(store.get_by_id(int(id)).value)
+    ))
+
+    # POST /todos?title=...
+    # Creates a new todo
+    app.map_post("/todos", lambda title: Results.created(
+        f"/todos/{store.add(title)['id']}",
+        store.get_all()[-1]
+    ))
+
+    print("Starting Culebral Web API on http://localhost:5000")
+    print("Endpoints:")
+    print("  GET  /          - Welcome message")
+    print("  GET  /todos     - List all todos")
+    print("  GET  /todos/{id} - Get todo by ID")
+    print("  POST /todos?title=... - Create todo")
+    print()
+
+    app.run("http://localhost:5000")

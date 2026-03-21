@@ -1,0 +1,74 @@
+# Algorithms — classic computer science algorithms in Culebral.
+#
+# Demonstrates recursion, generators, list operations, and
+# the Result type for error handling.
+#
+# Run with: culebral run samples/algorithms.leb
+
+# ─── Binary Search ───
+
+def binary_search(items: list, target: int) -> Result:
+    low = 0
+    high = len(items) - 1
+    while low <= high:
+        mid = (low + high) // 2
+        if items[mid] == target:
+            return Ok(mid)
+        elif items[mid] < target:
+            low = mid + 1
+        else:
+            high = mid - 1
+    return Err("not found")
+
+# ─── Fizzbuzz Generator ───
+
+def fizzbuzz(n: int):
+    for i in range(1, n + 1):
+        if i % 15 == 0:
+            yield "FizzBuzz"
+        elif i % 3 == 0:
+            yield "Fizz"
+        elif i % 5 == 0:
+            yield "Buzz"
+        else:
+            yield i
+
+# ─── Factorial (recursive) ───
+
+def factorial(n: int) -> int:
+    if n <= 1:
+        return 1
+    return n * factorial(n - 1)
+
+# ─── GCD (Euclidean algorithm) ───
+
+def gcd(a: int, b: int) -> int:
+    while b != 0:
+        a, b = b, a % b
+    return a
+
+def main():
+    # Binary search
+    data = [2, 5, 8, 12, 16, 23, 38, 45, 56, 72, 91]
+    print(f"Data: {data}")
+    r1 = binary_search(data, 23)
+    print(f"Search 23: index={r1.value}, ok={r1.is_ok}")
+    r2 = binary_search(data, 99)
+    print(f"Search 99: {r2.value}, ok={r2.is_ok}")
+    print()
+
+    # Fizzbuzz
+    print("FizzBuzz 1-20:")
+    for item in fizzbuzz(20):
+        print(item, end=" ")
+    print()
+    print()
+
+    # Factorials
+    for n in range(1, 11):
+        print(f"{n}! = {factorial(n)}")
+    print()
+
+    # GCD
+    print(f"gcd(48, 18) = {gcd(48, 18)}")
+    print(f"gcd(100, 75) = {gcd(100, 75)}")

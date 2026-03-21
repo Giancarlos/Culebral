@@ -1,0 +1,24 @@
+# JSON — serialize and deserialize data using System.Text.Json.
+#
+# No wrapper library needed — .NET's JSON support works directly
+# through Culebral's interop with automatic case bridging.
+#
+# Run with: culebral run samples/json_parsing.leb
+
+from System.Text.Json import JsonDocument, JsonSerializer
+
+def main():
+    # Parse a JSON string
+    json_str = """{"name": "Alice", "age": 30, "active": true}"""
+
+    doc = JsonDocument.parse(json_str)
+    root = doc.root_element
+
+    name = root.get_property("name").get_string()
+    age = root.get_property("age").get_int32()
+    print(f"Name: {name}, Age: {age}")
+
+    # Serialize a dictionary to JSON
+    data = {"language": "Culebral", "version": "0.1.0", "tests": 327}
+    json_out = JsonSerializer.serialize(data)
+    print(f"Serialized: {json_out}")

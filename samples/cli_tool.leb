@@ -1,0 +1,58 @@
+# CLI Tool — interactive command-line application with user input.
+#
+# Demonstrates input(), string methods, control flow, and
+# a simple command loop pattern.
+#
+# Run with: culebral run samples/cli_tool.leb
+
+def show_help():
+    print("Commands:")
+    print("  add <item>    - Add an item to the list")
+    print("  remove <item> - Remove an item from the list")
+    print("  list          - Show all items")
+    print("  count         - Show item count")
+    print("  clear         - Clear all items")
+    print("  help          - Show this help")
+    print("  quit          - Exit")
+
+def main():
+    items = []
+    print("=== Culebral Todo List ===")
+    show_help()
+    print()
+
+    while True:
+        cmd = input("> ")
+
+        if cmd == "quit":
+            print("Goodbye!")
+            break
+        elif cmd == "list":
+            if items:
+                for i in range(len(items)):
+                    print(f"  {i + 1}. {items[i]}")
+            else:
+                print("  (empty)")
+        elif cmd == "count":
+            print(f"  {len(items)} items")
+        elif cmd == "clear":
+            items = []
+            print("  Cleared.")
+        elif cmd == "help":
+            show_help()
+        elif cmd[0:4] == "add ":
+            item = cmd[4:]
+            items += [item]
+            print(f"  Added: {item}")
+        elif cmd[0:7] == "remove ":
+            item = cmd[7:]
+            # Find and remove
+            new_items = [x for x in items if x != item]
+            if len(new_items) < len(items):
+                items = new_items
+                print(f"  Removed: {item}")
+            else:
+                print(f"  Not found: {item}")
+        else:
+            print(f"  Unknown command: {cmd}")
+            print("  Type 'help' for commands.")
