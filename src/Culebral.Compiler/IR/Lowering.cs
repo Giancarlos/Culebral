@@ -1686,6 +1686,21 @@ public sealed class IrLowering
             {
                 var objType = _typeChecker.ResolvedTypes.TryGetValue(member.Object, out var ot) ? ot : null;
 
+                // Named tuple member access: result.name → array index access
+                if (objType is TupleCulebralType tupleType)
+                {
+                    for (int i = 0; i < tupleType.Names.Length; i++)
+                    {
+                        if (tupleType.Names[i] == member.Member)
+                        {
+                            LowerExpression(member.Object);
+                            _currentBlock.Emit(new IrTupleElement(i, expr.Span));
+                            break;
+                        }
+                    }
+                    break;
+                }
+
                 // .NET static property/field: Math.pi, Console.out
                 if (member.Object is IdentifierExpr objId && ResolveDotNetType(objId.Name) is Type staticDotNet)
                 {
@@ -1765,7 +1780,14 @@ public sealed class IrLowering
 
             case TupleExpr tuple:
                 foreach (var elem in tuple.Elements)
+                {
                     LowerExpression(elem);
+                    // Box value types for object[] storage
+                    var elemType = _typeChecker.ResolvedTypes.TryGetValue(elem, out var et) ? et : null;
+                    if (elemType is PrimitiveType tupleElemPt && tupleElemPt.ClrType is not null && tupleElemPt.ClrType.IsValueType)
+                        _currentBlock.Emit(new IrBox(tupleElemPt, elem.Span));
+                }
+                _currentBlock.Emit(new IrNewTuple(tuple.Elements.Count, expr.Span));
                 break;
 
             case FStringExpr fstr:
@@ -2568,60 +2590,37 @@ public sealed class IrLowering
         if (_currentBlock is null || _currentFunction is null) return;
 
         // RHS was already lowered by LowerAssignment before calling us.
-        // Two cases:
-        // 1. RHS is a TupleExpr → individual elements are on the stack (left to right)
-        // 2. RHS is a single expression → one value on stack, access fields Item1, Item2, etc.
+        // TupleExpr RHS now produces an object[] via IrNewTuple, same as any other expression.
+        // Store the tuple to a temp local, then access elements by index.
 
-        if (assign.Value is TupleExpr rhsTuple)
+        // Determine element types from the RHS tuple type (if available)
+        var rhsType = _typeChecker.ResolvedTypes.TryGetValue(assign.Value, out var rt) ? rt : null;
+        var tupleElemTypes = rhsType is TupleCulebralType tct ? tct.Elements : null;
+
+        var tupleLocal = CreateLocal("<unpack_tuple>", PrimitiveType.Object);
+        _currentBlock.Emit(new IrStoreLocal(tupleLocal.Index, assign.Span));
+
+        for (int i = 0; i < tupleTarget.Elements.Count; i++)
         {
-            // Elements are on the stack in order. Store to temp locals first (to handle swaps like a, b = b, a)
-            var tempLocals = new List<IrLocal>();
-            // Elements were pushed left-to-right, so store them in reverse to temp locals
-            for (int i = rhsTuple.Elements.Count - 1; i >= 0; i--)
-            {
-                // Use the actual resolved type of each RHS element for the temp local
-                var elemType = _typeChecker.ResolvedTypes.TryGetValue(rhsTuple.Elements[i], out var resolved)
-                    ? resolved
-                    : PrimitiveType.Object;
-                var temp = CreateLocal($"<unpack_tmp_{i}>", elemType);
-                _currentBlock.Emit(new IrStoreLocal(temp.Index, assign.Span));
-                tempLocals.Insert(0, temp);
-            }
+            _currentBlock.Emit(new IrLoadLocal(tupleLocal.Index, assign.Span));
+            _currentBlock.Emit(new IrTupleElement(i, assign.Span));
 
-            // Now assign temp locals to target identifiers in order
-            for (int i = 0; i < tupleTarget.Elements.Count && i < tempLocals.Count; i++)
-            {
-                _currentBlock.Emit(new IrLoadLocal(tempLocals[i].Index, assign.Span));
-                if (tupleTarget.Elements[i] is IdentifierExpr targetIdent)
-                {
-                    var local = GetOrCreateLocal(targetIdent.Name, assign.Span, tempLocals[i].Type);
-                    _currentBlock.Emit(new IrStoreLocal(local.Index, assign.Span));
-                }
-                else
-                {
-                    _currentBlock.Emit(new IrPop(assign.Span));
-                }
-            }
-        }
-        else
-        {
-            // Single expression on stack — store to temp, then access Item1, Item2, etc.
-            var tupleLocal = CreateLocal("<unpack_tuple>", PrimitiveType.Object);
-            _currentBlock.Emit(new IrStoreLocal(tupleLocal.Index, assign.Span));
+            // Determine the element type for proper local typing
+            var elemType = (tupleElemTypes is not null && i < tupleElemTypes.Length)
+                ? tupleElemTypes[i]
+                : (CulebralType)PrimitiveType.Object;
 
-            for (int i = 0; i < tupleTarget.Elements.Count; i++)
+            if (tupleTarget.Elements[i] is IdentifierExpr targetIdent)
             {
-                _currentBlock.Emit(new IrLoadLocal(tupleLocal.Index, assign.Span));
-                _currentBlock.Emit(new IrLoadField("System.ValueTuple", $"Item{i + 1}", assign.Span));
-                if (tupleTarget.Elements[i] is IdentifierExpr targetIdent)
-                {
-                    var local = GetOrCreateLocal(targetIdent.Name, assign.Span);
-                    _currentBlock.Emit(new IrStoreLocal(local.Index, assign.Span));
-                }
-                else
-                {
-                    _currentBlock.Emit(new IrPop(assign.Span));
-                }
+                var local = GetOrCreateLocal(targetIdent.Name, assign.Span, elemType);
+                // Unbox value types since tuple elements are stored as object in the array
+                if (elemType is PrimitiveType upt && upt.ClrType is not null && upt.ClrType.IsValueType)
+                    _currentBlock.Emit(new IrUnbox(upt, assign.Span));
+                _currentBlock.Emit(new IrStoreLocal(local.Index, assign.Span));
+            }
+            else
+            {
+                _currentBlock.Emit(new IrPop(assign.Span));
             }
         }
     }
@@ -3110,6 +3109,8 @@ public sealed class IrLowering
             IrInvokeDelegate => true,
             IrSlice => true,
             IrNewArrayFromStack => true,
+            IrNewTuple => true,
+            IrTupleElement => true,
             IrAwait { HasResult: var hr } => hr,
             IrStoreLocal or IrStoreField or IrPop or IrNop or IrReturn or IrBranch or IrBranchIf => false,
             _ => false,

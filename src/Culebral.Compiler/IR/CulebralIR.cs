@@ -221,6 +221,12 @@ public sealed record IrSlice(bool HasStart, bool HasStop, bool HasStep, SourceSp
 // Array creation from values already on the stack
 public sealed record IrNewArrayFromStack(int Count, SourceSpan Span) : IrInstruction(Span);
 
+// Tuple creation — pops ElementCount values from stack, creates object[] (named tuple runtime representation)
+public sealed record IrNewTuple(int ElementCount, SourceSpan Span) : IrInstruction(Span);
+
+// Tuple element access — pops a tuple (object[]) from stack, loads element at Index
+public sealed record IrTupleElement(int Index, SourceSpan Span) : IrInstruction(Span);
+
 // Generator yield — adds the value on the stack to the generator list
 public sealed record IrYield(SourceSpan Span) : IrInstruction(Span);
 

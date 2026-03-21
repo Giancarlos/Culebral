@@ -1525,6 +1525,53 @@ public class EmitTests : IDisposable
         Assert.Equal("10\n20\n30", output);
     }
 
+    // ─── Named Tuple Returns ───
+
+    [Fact]
+    public void NamedTuple_BasicAccess()
+    {
+        var output = CompileAndRun("""
+            def get_pair() -> (first: str, second: int):
+                return ("hello", 42)
+
+            def main():
+                result = get_pair()
+                print(result.first)
+                print(result.second)
+            """);
+        Assert.Equal("hello\n42", output);
+    }
+
+    [Fact]
+    public void NamedTuple_SwapFunction()
+    {
+        var output = CompileAndRun("""
+            def swap(a: int, b: int) -> (x: int, y: int):
+                return (b, a)
+
+            def main():
+                result = swap(1, 2)
+                print(result.x)
+                print(result.y)
+            """);
+        Assert.Equal("2\n1", output);
+    }
+
+    [Fact]
+    public void NamedTuple_Destructuring()
+    {
+        var output = CompileAndRun("""
+            def get_pair() -> (first: str, second: int):
+                return ("hello", 42)
+
+            def main():
+                name, age = get_pair()
+                print(name)
+                print(age)
+            """);
+        Assert.Equal("hello\n42", output);
+    }
+
     // ─── Phase 4 Batch 2: Lambda Expressions ───
 
     [Fact]

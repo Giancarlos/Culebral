@@ -1055,6 +1055,18 @@ public sealed class TypeChecker
     {
         var objType = InferType(member.Object);
 
+        // Named tuple member access: result.name → element type at corresponding index
+        if (objType is TupleCulebralType tupleType)
+        {
+            for (int i = 0; i < tupleType.Names.Length; i++)
+            {
+                if (tupleType.Names[i] == member.Member)
+                    return tupleType.Elements[i];
+            }
+            _diagnostics.Error("CUL2200", $"Tuple type {tupleType.DisplayName} has no member '{member.Member}'", member.Span);
+            return ErrorType.Instance;
+        }
+
         // .NET type static member access: File.read_all_text
         if (objType is DotNetType dotNetType)
         {

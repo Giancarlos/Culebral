@@ -276,6 +276,101 @@ public static class Program
     }
 
     /// <summary>
+    /// Compile Culebral source code from a string, writing the output assembly to <paramref name="outputPath"/>.
+    /// This decouples the input side from the filesystem — the source is provided directly.
+    /// </summary>
+    /// <param name="source">The Culebral source code.</param>
+    /// <param name="outputPath">Path where the compiled .dll will be written.</param>
+    /// <param name="sourceName">Name used in diagnostics for error messages (default: "&lt;script&gt;").</param>
+    public static CompilationResult CompileFromSource(string source, string outputPath, string sourceName = "<script>")
+    {
+        var diagnostics = new DiagnosticBag();
+
+        // Phase 1: Lexing
+        var lexer = new CulebralLexer(source, sourceName, diagnostics);
+        var tokens = lexer.Tokenize();
+        if (diagnostics.HasErrors)
+            return new CompilationResult(false, diagnostics);
+
+        // Phase 2: Parsing
+        var parser = new CulebralParser(tokens, diagnostics);
+        var ast = parser.ParseCompilationUnit();
+        if (diagnostics.HasErrors)
+            return new CompilationResult(false, diagnostics);
+
+        // Phase 3: Type Checking
+        var typeChecker = new TypeChecker(diagnostics);
+        typeChecker.Check(ast);
+        if (diagnostics.HasErrors)
+            return new CompilationResult(false, diagnostics);
+
+        // Phase 4: IR Lowering
+        var lowering = new IrLowering(diagnostics, typeChecker);
+        var moduleName = Path.GetFileNameWithoutExtension(sourceName);
+        var module = lowering.Lower(ast, moduleName, sourceName);
+        if (diagnostics.HasErrors)
+            return new CompilationResult(false, diagnostics);
+
+        // Phase 5: CIL Emission
+        var emitter = new CilEmitter(diagnostics, outputPath);
+        var success = emitter.Emit(module);
+
+        return new CompilationResult(success, diagnostics);
+    }
+
+    /// <summary>
+    /// Compile and execute Culebral source code in a temporary directory, capturing stdout/stderr.
+    /// Cleans up temp files after execution.
+    /// </summary>
+    /// <param name="source">The Culebral source code.</param>
+    /// <param name="sourceName">Name used in diagnostics (default: "&lt;script&gt;").</param>
+    /// <returns>A tuple of (Success, stdout Output, stderr Errors).</returns>
+    public static (bool Success, string Output, string Errors) ExecuteSource(string source, string sourceName = "<script>")
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"culebral_exec_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var moduleName = Path.GetFileNameWithoutExtension(sourceName);
+            if (moduleName == "<script>") moduleName = "script";
+            var dllPath = Path.Combine(tempDir, moduleName + ".dll");
+
+            var result = CompileFromSource(source, dllPath, sourceName);
+            if (!result.Success)
+            {
+                return (false, string.Empty, result.Diagnostics.FormatAll());
+            }
+
+            // Run the compiled assembly
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = dllPath,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+
+            using var process = System.Diagnostics.Process.Start(psi);
+            if (process is null)
+            {
+                return (false, string.Empty, "Failed to start dotnet process.");
+            }
+
+            var output = process.StandardOutput.ReadToEnd();
+            var errors = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+
+            return (process.ExitCode == 0, output, errors);
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    /// <summary>
     /// Search for a culebral.toml project file starting from the source file's directory
     /// and walking up to parent directories.
     /// </summary>

@@ -1347,6 +1347,42 @@ public sealed class CilEmitter
                 break;
             }
 
+            // ─── Tuple construction (object[]) ───
+
+            case IrNewTuple { ElementCount: var tupleCount }:
+            {
+                // Same as IrNewArrayFromStack — pop N values, create object[]
+                var tupleTempLocals = new LocalBuilder[tupleCount];
+                for (int i = tupleCount - 1; i >= 0; i--)
+                {
+                    tupleTempLocals[i] = il.DeclareLocal(typeof(object));
+                    il.Emit(OpCodes.Stloc, tupleTempLocals[i]);
+                }
+
+                il.Emit(OpCodes.Ldc_I4, tupleCount);
+                il.Emit(OpCodes.Newarr, typeof(object));
+
+                for (int i = 0; i < tupleCount; i++)
+                {
+                    il.Emit(OpCodes.Dup);
+                    il.Emit(OpCodes.Ldc_I4, i);
+                    il.Emit(OpCodes.Ldloc, tupleTempLocals[i]);
+                    il.Emit(OpCodes.Stelem_Ref);
+                }
+                break;
+            }
+
+            // ─── Tuple element access (object[] index) ───
+
+            case IrTupleElement { Index: var tupleIdx }:
+            {
+                // Stack: [object[] tuple] → load element at index
+                il.Emit(OpCodes.Castclass, typeof(object[]));
+                il.Emit(OpCodes.Ldc_I4, tupleIdx);
+                il.Emit(OpCodes.Ldelem_Ref);
+                break;
+            }
+
             case IrLoadElement:
             {
                 // Stack: [collection (object), index (int)]
@@ -3601,6 +3637,8 @@ public sealed class CilEmitter
             IrInvokeDelegate => typeof(object),
             IrSlice => typeof(object),
             IrNewArrayFromStack => typeof(object[]),
+            IrNewTuple => typeof(object[]),
+            IrTupleElement => typeof(object),
             IrListConcat => typeof(List<object>),
             IrDictMerge => typeof(Dictionary<object, object>),
             IrListRepeat => typeof(List<object>),
