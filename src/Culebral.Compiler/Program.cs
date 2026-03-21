@@ -528,19 +528,49 @@ public static class Program
         var source = File.ReadAllText(inputPath);
         var diagnostics = new DiagnosticBag();
 
-        // Phase 0: NuGet Resolution (if culebral.toml exists)
+        // Phase 0: NuGet Resolution (if project file exists)
         List<string>? frameworkRefs = null;
-        var tomlPath = FindProjectFile(inputPath);
-        if (tomlPath is not null)
+        string? targetFramework = null;
+        var projectFilePath = FindProjectFile(inputPath);
+        if (projectFilePath is not null)
         {
-            var projectFile = ProjectFileParser.Parse(tomlPath);
-            if (projectFile.Dependencies.Count > 0)
+            if (projectFilePath.EndsWith(".lebproj", StringComparison.OrdinalIgnoreCase))
             {
-                var nugetResolver = new NuGetResolver(diagnostics);
-                nugetResolver.Resolve(projectFile);
-                frameworkRefs = nugetResolver.GetFrameworkReferences(projectFile);
-                // NuGet errors are non-fatal — compilation continues
-                // with whatever types are already available
+                // .lebproj — MSBuild XML format. Run dotnet restore on the real project,
+                // then read assembly paths from project.assets.json.
+                var lebProject = LebProjectParser.Parse(projectFilePath);
+                targetFramework = lebProject.TargetFramework;
+                frameworkRefs = lebProject.FrameworkReferences;
+
+                if (lebProject.Dependencies.Count > 0)
+                {
+                    // Resolve NuGet packages via dotnet restore + project.assets.json
+                    var assetsReader = new ProjectAssetsReader(diagnostics);
+                    if (assetsReader.RestoreAndResolve(projectFilePath))
+                    {
+                        assetsReader.LoadResolvedAssemblies();
+                    }
+
+                    // Also resolve framework references from the shared runtime
+                    // (these aren't in project.assets.json — they ship with .NET)
+                    var projectFile = lebProject.ToProjectFileParser();
+                    var nugetResolver = new NuGetResolver(diagnostics);
+                    nugetResolver.ResolveFrameworkReferencesOnly(projectFile);
+                    // NuGet errors are non-fatal — compilation continues
+                }
+            }
+            else
+            {
+                // culebral.toml — legacy format
+                var projectFile = ProjectFileParser.Parse(projectFilePath);
+                targetFramework = projectFile.TargetFramework;
+                if (projectFile.Dependencies.Count > 0)
+                {
+                    var nugetResolver = new NuGetResolver(diagnostics);
+                    nugetResolver.Resolve(projectFile);
+                    frameworkRefs = nugetResolver.GetFrameworkReferences(projectFile);
+                    // NuGet errors are non-fatal — compilation continues
+                }
             }
         }
 
@@ -573,6 +603,8 @@ public static class Program
         var emitter = new CilEmitter(diagnostics, outputPath);
         if (frameworkRefs is not null)
             emitter.FrameworkReferences.AddRange(frameworkRefs);
+        if (targetFramework is not null)
+            emitter.TargetFramework = targetFramework;
         var success = emitter.Emit(module);
 
         return new CompilationResult(success, diagnostics);
@@ -674,17 +706,25 @@ public static class Program
     }
 
     /// <summary>
-    /// Search for a culebral.toml project file starting from the source file's directory
+    /// Search for a project file starting from the source file's directory
     /// and walking up to parent directories.
+    /// Prefers .lebproj files (MSBuild XML) over culebral.toml (legacy format).
     /// </summary>
     private static string? FindProjectFile(string sourceFilePath)
     {
         var dir = Path.GetDirectoryName(Path.GetFullPath(sourceFilePath));
         while (dir is not null)
         {
+            // Prefer .lebproj files (MSBuild XML format)
+            var lebprojFiles = Directory.GetFiles(dir, "*.lebproj");
+            if (lebprojFiles.Length > 0)
+                return lebprojFiles[0];
+
+            // Fall back to culebral.toml (legacy format)
             var tomlPath = Path.Combine(dir, "culebral.toml");
             if (File.Exists(tomlPath))
                 return tomlPath;
+
             dir = Path.GetDirectoryName(dir);
         }
         return null;

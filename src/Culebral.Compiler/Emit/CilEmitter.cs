@@ -32,6 +32,9 @@ public sealed class CilEmitter
     /// <summary>Additional framework references for runtimeconfig.json (e.g., Microsoft.AspNetCore.App).</summary>
     public List<string> FrameworkReferences { get; } = [];
 
+    /// <summary>Target framework moniker (e.g., "net10.0"). Used in runtimeconfig.json.</summary>
+    public string TargetFramework { get; set; } = "net10.0";
+
     // PDB debug info: maps method metadata tokens to their sequence points
     private readonly List<MethodDebugInfo> _methodDebugInfos = [];
 
@@ -4749,15 +4752,19 @@ public sealed class CilEmitter
     {
         var configPath = Path.ChangeExtension(_outputPath, ".runtimeconfig.json");
 
+        // Derive the runtime version from the target framework moniker.
+        // "net10.0" → "10.0.0", "net8.0" → "8.0.0", etc.
+        var runtimeVersion = DeriveRuntimeVersion(TargetFramework);
+
         if (FrameworkReferences.Count == 0)
         {
-            var config = """
+            var config = $$"""
             {
               "runtimeOptions": {
-                "tfm": "net10.0",
+                "tfm": "{{TargetFramework}}",
                 "framework": {
                   "name": "Microsoft.NETCore.App",
-                  "version": "10.0.0"
+                  "version": "{{runtimeVersion}}"
                 }
               }
             }
@@ -4770,19 +4777,39 @@ public sealed class CilEmitter
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("{");
             sb.AppendLine("  \"runtimeOptions\": {");
-            sb.AppendLine("    \"tfm\": \"net10.0\",");
+            sb.AppendLine($"    \"tfm\": \"{TargetFramework}\",");
             sb.AppendLine("    \"frameworks\": [");
-            sb.AppendLine("      { \"name\": \"Microsoft.NETCore.App\", \"version\": \"10.0.0\" },");
+            sb.AppendLine($"      {{ \"name\": \"Microsoft.NETCore.App\", \"version\": \"{runtimeVersion}\" }},");
             for (int i = 0; i < FrameworkReferences.Count; i++)
             {
                 var comma = i < FrameworkReferences.Count - 1 ? "," : "";
-                sb.AppendLine($"      {{ \"name\": \"{FrameworkReferences[i]}\", \"version\": \"10.0.0\" }}{comma}");
+                sb.AppendLine($"      {{ \"name\": \"{FrameworkReferences[i]}\", \"version\": \"{runtimeVersion}\" }}{comma}");
             }
             sb.AppendLine("    ]");
             sb.AppendLine("  }");
             sb.AppendLine("}");
             File.WriteAllText(configPath, sb.ToString());
         }
+    }
+
+    /// <summary>
+    /// Derive the .NET runtime version from a target framework moniker.
+    /// "net10.0" → "10.0.0", "net8.0" → "8.0.0", "net9.0" → "9.0.0".
+    /// </summary>
+    internal static string DeriveRuntimeVersion(string tfm)
+    {
+        // Strip the "net" prefix: "net10.0" → "10.0"
+        if (tfm.StartsWith("net") && !tfm.StartsWith("netcoreapp") && !tfm.StartsWith("netstandard"))
+        {
+            var version = tfm[3..];
+            // Ensure three-part version: "10.0" → "10.0.0"
+            var parts = version.Split('.');
+            if (parts.Length == 2)
+                return $"{version}.0";
+            return version;
+        }
+        // Fallback for unexpected formats
+        return "10.0.0";
     }
 
     // ─── Type Resolution ───

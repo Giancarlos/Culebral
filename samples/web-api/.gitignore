@@ -1,3 +1,5 @@
 *.dll
 *.pdb
 *.runtimeconfig.json
+obj/
+bin/

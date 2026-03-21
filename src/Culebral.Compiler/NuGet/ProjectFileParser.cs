@@ -86,6 +86,22 @@ public sealed class ProjectFileParser
         return parser;
     }
 
+    /// <summary>
+    /// Create a ProjectFileParser from .lebproj-parsed data, allowing the existing
+    /// NuGet resolution pipeline to work with both culebral.toml and .lebproj formats.
+    /// </summary>
+    public static ProjectFileParser FromLebProject(
+        string? projectName, string targetFramework, List<PackageReference> dependencies)
+    {
+        var parser = new ProjectFileParser
+        {
+            ProjectName = projectName,
+            TargetFramework = targetFramework,
+        };
+        parser.Dependencies.AddRange(dependencies);
+        return parser;
+    }
+
     private static string UnquoteToml(string value)
     {
         value = value.Trim();

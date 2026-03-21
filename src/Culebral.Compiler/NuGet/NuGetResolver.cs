@@ -96,6 +96,19 @@ public sealed class NuGetResolver
     }
 
     /// <summary>
+    /// Resolve only framework references (e.g., Microsoft.AspNetCore.App) from the
+    /// .NET shared runtime. Used when NuGet packages are resolved via dotnet restore
+    /// and project.assets.json, but framework references still need runtime loading.
+    /// </summary>
+    public void ResolveFrameworkReferencesOnly(ProjectFileParser projectFile)
+    {
+        foreach (var dep in projectFile.Dependencies.Where(d => d.IsFrameworkReference))
+        {
+            ResolveFrameworkReference(dep.PackageId);
+        }
+    }
+
+    /// <summary>
     /// Resolve NuGet packages using the NuGet.Protocol client libraries.
     /// Checks the global cache first, downloads from nuget.org if missing.
     /// </summary>

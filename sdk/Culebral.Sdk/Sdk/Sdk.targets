@@ -1,0 +1,60 @@
+<Project>
+  <!--
+    Culebral SDK targets — imported after all user-defined properties and items.
+
+    Strategy: We import the full .NET SDK targets (which gives us NuGet restore,
+    dependency resolution, runtimeconfig.json generation, etc.) and then override
+    only the CoreCompile target to invoke the Culebral compiler instead of csc.
+
+    This means `dotnet restore`, `dotnet build`, and `dotnet run` all work natively.
+  -->
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+
+  <!-- Replace C# source files with Culebral source files -->
+  <ItemGroup>
+    <Compile Remove="**/*.cs" />
+    <Compile Include="**/*.leb" Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+  </ItemGroup>
+
+  <!--
+    Override CoreCompile to call the Culebral compiler.
+
+    MSBuild's standard .NET SDK defines CoreCompile as the target that invokes csc.
+    We replace it with a call to `culebral build`, passing:
+      - Source files via @(Compile)
+      - Reference assemblies via @(ReferencePath)
+      - Output path matching what MSBuild expects
+
+    The rest of the build pipeline (restore, dependency resolution, runtimeconfig,
+    deps.json, publish) is handled by the standard .NET SDK targets.
+  -->
+  <Target Name="CoreCompile"
+          DependsOnTargets="$(CoreCompileDependsOn)"
+          Inputs="@(Compile)"
+          Outputs="@(IntermediateAssembly)">
+
+    <!-- Determine the Culebral compiler path. If CulebraCompilerPath is set, use it;
+         otherwise assume `culebral` is on the PATH. -->
+    <PropertyGroup>
+      <_CulebralCompiler Condition="'$(CulebralCompilerPath)' != ''">$(CulebralCompilerPath)</_CulebralCompiler>
+      <_CulebralCompiler Condition="'$(CulebralCompilerPath)' == ''">culebral</_CulebralCompiler>
+    </PropertyGroup>
+
+    <!-- Ensure the intermediate output directory exists -->
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+
+    <!-- Invoke the Culebral compiler.
+         For now, compile the first .leb source file (single-file projects).
+         Multi-file compilation can be added later. -->
+    <Exec Command="&quot;$(_CulebralCompiler)&quot; build @(Compile->'&quot;%(FullPath)&quot;', ' ') --output &quot;@(IntermediateAssembly->'%(FullPath)')&quot;"
+          StandardOutputImportance="high"
+          StandardErrorImportance="high" />
+  </Target>
+
+  <!--
+    Skip the C#-specific targets that don't apply to Culebral.
+    These would fail because there are no .cs files to compile.
+  -->
+  <Target Name="GenerateSatelliteAssemblies" />
+
+</Project>

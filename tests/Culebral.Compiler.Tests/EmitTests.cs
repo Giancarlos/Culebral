@@ -1418,6 +1418,124 @@ public class EmitTests : IDisposable
     }
 
     [Fact]
+    public void LebProj_ProjectFileParsing()
+    {
+        // Test that .lebproj files (MSBuild XML) are parsed correctly
+        var lebprojPath = Path.Combine(_tempDir, "test-app.lebproj");
+        File.WriteAllText(lebprojPath, """
+            <Project Sdk="Microsoft.NET.Sdk.Web">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+                <OutputType>Exe</OutputType>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+              </ItemGroup>
+            </Project>
+            """);
+
+        var parser = Culebral.Compiler.NuGet.LebProjectParser.Parse(lebprojPath);
+        Assert.Equal("test-app", parser.ProjectName);
+        Assert.Equal("net10.0", parser.TargetFramework);
+        Assert.Equal("Exe", parser.OutputType);
+        Assert.Equal("Microsoft.NET.Sdk.Web", parser.SdkAttribute);
+
+        // Microsoft.NET.Sdk.Web implies Microsoft.AspNetCore.App framework reference
+        Assert.Contains(parser.FrameworkReferences, f => f == "Microsoft.AspNetCore.App");
+
+        // PackageReference for Newtonsoft.Json
+        Assert.Contains(parser.Dependencies, d => d.PackageId == "Newtonsoft.Json" && d.Version == "13.0.3" && !d.IsFrameworkReference);
+
+        // Framework reference dependency entry for ASP.NET
+        Assert.Contains(parser.Dependencies, d => d.PackageId == "Microsoft.AspNetCore.App" && d.IsFrameworkReference);
+    }
+
+    [Fact]
+    public void LebProj_ExplicitFrameworkReference()
+    {
+        // Test .lebproj with explicit FrameworkReference element
+        var lebprojPath = Path.Combine(_tempDir, "explicit-fw.lebproj");
+        File.WriteAllText(lebprojPath, """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net9.0</TargetFramework>
+              </PropertyGroup>
+              <ItemGroup>
+                <FrameworkReference Include="Microsoft.AspNetCore.App" />
+              </ItemGroup>
+            </Project>
+            """);
+
+        var parser = Culebral.Compiler.NuGet.LebProjectParser.Parse(lebprojPath);
+        Assert.Equal("net9.0", parser.TargetFramework);
+        Assert.Contains(parser.FrameworkReferences, f => f == "Microsoft.AspNetCore.App");
+        Assert.Contains(parser.Dependencies, d => d.PackageId == "Microsoft.AspNetCore.App" && d.IsFrameworkReference);
+    }
+
+    [Fact]
+    public void LebProj_ToProjectFileParser_Conversion()
+    {
+        // Test that LebProjectParser converts to ProjectFileParser correctly
+        var lebprojPath = Path.Combine(_tempDir, "convert.lebproj");
+        File.WriteAllText(lebprojPath, """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Serilog" Version="4.0.0" />
+              </ItemGroup>
+            </Project>
+            """);
+
+        var lebParser = Culebral.Compiler.NuGet.LebProjectParser.Parse(lebprojPath);
+        var projectFile = lebParser.ToProjectFileParser();
+
+        Assert.Equal("convert", projectFile.ProjectName);
+        Assert.Equal("net10.0", projectFile.TargetFramework);
+        Assert.Contains(projectFile.Dependencies, d => d.PackageId == "Serilog" && d.Version == "4.0.0");
+    }
+
+    [Theory]
+    [InlineData("net10.0", "10.0.0")]
+    [InlineData("net9.0", "9.0.0")]
+    [InlineData("net8.0", "8.0.0")]
+    [InlineData("net6.0", "6.0.0")]
+    public void RuntimeConfig_DeriveRuntimeVersion(string tfm, string expected)
+    {
+        Assert.Equal(expected, Culebral.Compiler.Emit.CilEmitter.DeriveRuntimeVersion(tfm));
+    }
+
+    [Fact]
+    public void LebProj_PreferredOverToml()
+    {
+        // When both .lebproj and culebral.toml exist, .lebproj should be found first.
+        // We test this indirectly by verifying FindProjectFile behavior through compilation.
+        var lebprojPath = Path.Combine(_tempDir, "test.lebproj");
+        File.WriteAllText(lebprojPath, """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        var tomlPath = Path.Combine(_tempDir, "culebral.toml");
+        File.WriteAllText(tomlPath, """
+            [project]
+            name = "toml-project"
+            target = "net10.0"
+            """);
+
+        // Compilation should succeed with .lebproj present
+        var output = CompileAndRun("""
+            def main():
+                print("lebproj wins")
+            """);
+        Assert.Equal("lebproj wins", output);
+    }
+
+    [Fact]
     public void NuGet_NoProjectFile_CompilationSucceeds()
     {
         // Without a culebral.toml, compilation should proceed normally

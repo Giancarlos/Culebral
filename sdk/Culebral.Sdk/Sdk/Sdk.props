@@ -1,0 +1,19 @@
+<Project>
+  <!--
+    Culebral SDK props — imported before any user-defined properties.
+    Delegates to the standard .NET SDK for framework resolution, NuGet restore,
+    and all the infrastructure that makes `dotnet build` work.
+  -->
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+
+  <PropertyGroup>
+    <!-- Default to Exe output for Culebral projects (most are applications) -->
+    <OutputType Condition="'$(OutputType)' == ''">Exe</OutputType>
+
+    <!-- Culebral source files use the .leb extension -->
+    <DefaultLanguageSourceExtension>.leb</DefaultLanguageSourceExtension>
+
+    <!-- Mark this as a Culebral project for conditional logic in targets -->
+    <IsCulebralProject>true</IsCulebralProject>
+  </PropertyGroup>
+</Project>
