@@ -201,28 +201,55 @@ The compiler implements a full pipeline: Source → Lexer → Parser → Type Ch
 - **`assert` statement** → conditional throw with optional message
 - **Built-in functions** → `abs`, `min`, `max`, `chr`, `ord`, `type`, `input`, `round`
 
+### Phase 4 Batch 4 — Python Compatibility (Complete)
+- **Truthiness** → `if items:`, `while queue:`, `and`/`or`/`not` on non-bool types
+- **Negative indexing** → `items[-1]` returns last element
+- **True division** → `10 / 3` returns `3.333...` (float), `//` for integer
+- **List concatenation** → `[1,2] + [3,4]` returns `[1,2,3,4]`
+- **List/string repetition** → `[0] * 5`, `"ha" * 3`
+- **String `in`** → `"bc" in "abcd"` (substring check)
+- **List extend** → `items += [4, 5]` calls AddRange
+- **Chained assignment** → `a = b = c = 0`
+- **Multiple except types** → `except (ValueError, TypeError)`
+- **Call-site unpacking** → `f(*args)`
+- **Dict merge** → `d1 | d2`
+- **Float promotion** → `2 ** -1` returns `0.5`
+- **Multi-type generics** → `Dictionary[str, int]()`
+
+### Phase 4 Batch 5 — Advanced Features (Complete)
+- **Async/await** → Phase 1 synchronous via `.GetAwaiter().GetResult()`
+- **Null safety flow typing** → type narrowing after `if x is None: return`
+- **Named tuple returns** → `-> (name: str, age: int)` with `.name` access
+- **Built-in Result/Ok/Err** → algebraic error handling without imports
+- **Python-compatible print()** → multi-arg, sep, end, flush, file
+- **Fixed broken stubs** → bool, sorted, enumerate, zip, map, filter, isinstance
+- **Added missing builtins** → all, any, sum, list, dict, hash, reversed
+- **Fixed overloads** → min/max iterable, range negative step, round ndigits, int base
+
+### Phase 4 Batch 6 — Tooling (Complete)
+- **PDB debug info** → portable PDB with sequence points for step-through debugging
+- **REPL** → `culebral repl` interactive mode with multi-line input
+- **Formatter** → `culebral fmt [--check] <file.leb>` with whitespace/blank line rules
+- **Test runner** → `culebral test <file.leb>` discovers and runs `test_` functions
+- **Embedding MVP** → `Culebral.Scripting` with CulebralEngine, Execute, Eval, global injection
+
 ## Test Suite
-- 212 tests total, all passing
-- Lexer tests: 14 (tokens, literals, indentation, brackets, edge cases)
-- Parser tests: 39 (all language constructs including tuples, for-else, while-else)
-- Type checker tests: 12 (symbols, types, errors, generic constraints)
-- End-to-end emit tests: 147 (compile → run → verify output)
-  - Phase 1: 29 tests (functions, control flow, arithmetic, strings, recursion, booleans)
-  - Phase 2: 19 tests (classes, constructors, fields, @field, interfaces, structs, records)
-  - Phase 3: 22 tests (.NET interop, imports, case bridging, generics, extension methods, NuGet)
-  - Phase 4 batch 1: 16 tests (is/not, try/except, raise, power, floor div, match)
-  - Phase 4 batch 2: 25 tests (sets, dicts, with, tuples, lambdas, slicing, casts, record-with, type aliases)
-  - Phase 4 batch 3: 36 tests (dunder methods, comparison chaining, generics, decorators, for-else, yield, assert, builtins)
+- 319 tests total (318 passing, 1 skipped)
+- Lexer tests: 14
+- Parser tests: 45
+- Type checker tests: 15
+- Formatter tests: 14
+- Scripting tests: 15
+- End-to-end emit tests: 216
 
 ## Known Limitations / Next Steps
 
-### Phase 4 Remaining
-- Async/await codegen (Task-based state machine)
-- `async for` / `async with`
-- Null safety with flow typing (type narrowing after null checks)
-- Named tuple returns and destructuring
-- PDB debug information / source maps
+### Remaining
 - LSP server for editor support
+- `async for` / `async with`
+- True async state machines (currently synchronous)
+- Host function injection in embedding (API surface exists, wiring needed)
+- `culebral.testing` standard library module
 
-### Phase 5 — Standard Library
+### Phase 5 — Standard Library (minimal — .NET interop IS the stdlib)
 ### Phase 6 — Native Modules (LLVM)
