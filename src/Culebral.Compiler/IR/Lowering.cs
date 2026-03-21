@@ -3135,7 +3135,10 @@ public sealed class IrLowering
             IrCallBuiltin { Name: "assert_equal" or "assert_not_equal" } => false, // void
             IrCallBuiltin => true,
             IrCall => true, // conservative — may be void but safer to pop
-            IrCallMethod => true,
+            IrCallMethod { DeclaringType: var dt, MethodName: var mn } =>
+                !(_typeDefs.TryGetValue(dt, out var td)
+                  && td.Methods.FirstOrDefault(m => m.Name == mn) is { ReturnType: var rt }
+                  && rt == PrimitiveType.Void),
             IrCallVirtual { MethodName: "Add" } => false, // List.Add returns void
             IrCallVirtual => true,
             IrCallDotNetStatic { DeclaringType: var t, MethodName: var n, ArgCount: var a }
