@@ -3436,4 +3436,59 @@ public class EmitTests : IDisposable
         Assert.Equal(0, process.ExitCode);
         Assert.Equal("Hello, world", output);
     }
+
+    // ─── async for / async with ───
+
+    [Fact]
+    public void AsyncFor_CompilesLikeRegularFor()
+    {
+        var output = CompileAndRun("""
+            async def main():
+                total = 0
+                async for i in range(5):
+                    total = total + i
+                print(total)
+            """);
+        Assert.Equal("10", output);
+    }
+
+    [Fact]
+    public void AsyncWith_CompilesLikeRegularWith()
+    {
+        var output = CompileAndRun("""
+            from System.Text import StringBuilder
+
+            def main():
+                async with StringBuilder() as sb:
+                    sb.append("hello")
+                    print(sb.to_string())
+            """);
+        Assert.Equal("hello", output);
+    }
+
+    // ─── assert_equal / assert_not_equal ───
+
+    [Fact]
+    public void AssertEqual_PassesWhenEqual()
+    {
+        var output = CompileAndRun("""
+            def main():
+                assert_equal(4, 2 + 2)
+                assert_equal("hello", "hello")
+                print("ok")
+            """);
+        Assert.Equal("ok", output);
+    }
+
+    [Fact]
+    public void AssertNotEqual_PassesWhenDifferent()
+    {
+        var output = CompileAndRun("""
+            def main():
+                assert_not_equal(3, 2 + 2)
+                assert_not_equal("a", "b")
+                print("ok")
+            """);
+        Assert.Equal("ok", output);
+    }
 }

@@ -9,8 +9,11 @@ namespace Culebral.Scripting;
 /// execute Culebral source code in-process.
 ///
 /// Global variables set via <see cref="SetGlobal"/> are injected into scripts as local
-/// variable assignments at the top of each function body. Host function injection
-/// (via <see cref="SetFunction"/>) is stored but requires compiler-level support (future work).
+/// variable assignments at the top of each function body.
+///
+/// Parameterless host functions registered via <see cref="SetFunction"/> are pre-computed
+/// at execution time and injected as global variables. Functions with parameters require
+/// in-process execution (future work) and are currently ignored during injection.
 /// </summary>
 public sealed class CulebralEngine : IDisposable
 {
@@ -49,7 +52,7 @@ public sealed class CulebralEngine : IDisposable
     /// </summary>
     public string Execute(string source)
     {
-        var injected = InjectGlobals(source);
+        var injected = InjectFunctions(InjectGlobals(source));
         var (success, output, errors) = Culebral.Compiler.Program.ExecuteSource(injected);
         if (!success)
         {
@@ -109,6 +112,57 @@ public sealed class CulebralEngine : IDisposable
             });
 
         return result;
+    }
+
+    /// <summary>
+    /// Inject parameterless host functions as pre-computed global variable assignments.
+    /// Functions with parameters are skipped (they require in-process execution).
+    /// The delegate is invoked at injection time and its return value is serialized
+    /// as a Culebral literal, then injected the same way as globals.
+    /// </summary>
+    internal string InjectFunctions(string source)
+    {
+        if (_functions.Count == 0)
+            return source;
+
+        // Pre-compute parameterless functions and inject their results as globals
+        var precomputed = new Dictionary<string, object?>();
+        foreach (var (name, func) in _functions)
+        {
+            var method = func.Method;
+            if (method.GetParameters().Length == 0)
+            {
+                try
+                {
+                    var result = func.DynamicInvoke();
+                    precomputed[name] = result;
+                }
+                catch
+                {
+                    // If the function throws, skip it
+                }
+            }
+        }
+
+        if (precomputed.Count == 0)
+            return source;
+
+        // Inject using the same regex pattern as InjectGlobals
+        return Regex.Replace(
+            source,
+            @"(def\s+\w+\s*\([^)]*\)\s*(?:->\s*\w+\s*)?:\s*\n)([ \t]+)",
+            match =>
+            {
+                var header = match.Groups[1].Value;
+                var indent = match.Groups[2].Value;
+                var sb = new StringBuilder();
+                foreach (var (name, value) in precomputed)
+                {
+                    sb.Append(indent);
+                    sb.AppendLine(SerializeGlobal(name, value));
+                }
+                return header + sb.ToString() + indent;
+            });
     }
 
     /// <summary>

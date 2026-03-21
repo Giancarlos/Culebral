@@ -2232,6 +2232,72 @@ public sealed class CilEmitter
                 break;
             }
 
+            case "assert_equal":
+            {
+                // assert_equal(expected, actual) → if !Object.Equals(expected, actual) throw Exception
+                // Stack: [expected, actual]
+                var aeExpected = il.DeclareLocal(typeof(object));
+                var aeActual = il.DeclareLocal(typeof(object));
+                // Box value types for proper comparison
+                var aeActualType = InferStackTopType(callBuiltin, func);
+                if (aeActualType.IsValueType)
+                    il.Emit(OpCodes.Box, aeActualType);
+                il.Emit(OpCodes.Stloc, aeActual);
+                // The expected is the one pushed first (below actual on the stack)
+                var aeExpectedType = InferSecondStackType(callBuiltin, func);
+                if (aeExpectedType.IsValueType)
+                    il.Emit(OpCodes.Box, aeExpectedType);
+                il.Emit(OpCodes.Stloc, aeExpected);
+                il.Emit(OpCodes.Ldloc, aeExpected);
+                il.Emit(OpCodes.Ldloc, aeActual);
+                il.Emit(OpCodes.Call, typeof(object).GetMethod("Equals", [typeof(object), typeof(object)])!);
+                var aeOk = il.DefineLabel();
+                il.Emit(OpCodes.Brtrue, aeOk);
+                // Build error message: "Expected {expected}, got {actual}"
+                il.Emit(OpCodes.Ldstr, "assert_equal failed: expected ");
+                il.Emit(OpCodes.Ldloc, aeExpected);
+                il.Emit(OpCodes.Callvirt, typeof(object).GetMethod("ToString")!);
+                il.Emit(OpCodes.Call, typeof(string).GetMethod("Concat", [typeof(string), typeof(string)])!);
+                il.Emit(OpCodes.Ldstr, ", got ");
+                il.Emit(OpCodes.Call, typeof(string).GetMethod("Concat", [typeof(string), typeof(string)])!);
+                il.Emit(OpCodes.Ldloc, aeActual);
+                il.Emit(OpCodes.Callvirt, typeof(object).GetMethod("ToString")!);
+                il.Emit(OpCodes.Call, typeof(string).GetMethod("Concat", [typeof(string), typeof(string)])!);
+                il.Emit(OpCodes.Newobj, typeof(Exception).GetConstructor([typeof(string)])!);
+                il.Emit(OpCodes.Throw);
+                il.MarkLabel(aeOk);
+                break;
+            }
+
+            case "assert_not_equal":
+            {
+                // assert_not_equal(a, b) → if Object.Equals(a, b) throw Exception
+                var aneA = il.DeclareLocal(typeof(object));
+                var aneB = il.DeclareLocal(typeof(object));
+                var aneBType = InferStackTopType(callBuiltin, func);
+                if (aneBType.IsValueType)
+                    il.Emit(OpCodes.Box, aneBType);
+                il.Emit(OpCodes.Stloc, aneB);
+                var aneAType = InferSecondStackType(callBuiltin, func);
+                if (aneAType.IsValueType)
+                    il.Emit(OpCodes.Box, aneAType);
+                il.Emit(OpCodes.Stloc, aneA);
+                il.Emit(OpCodes.Ldloc, aneA);
+                il.Emit(OpCodes.Ldloc, aneB);
+                il.Emit(OpCodes.Call, typeof(object).GetMethod("Equals", [typeof(object), typeof(object)])!);
+                var aneOk = il.DefineLabel();
+                il.Emit(OpCodes.Brfalse, aneOk);
+                // Build error message
+                il.Emit(OpCodes.Ldstr, "assert_not_equal failed: values are equal: ");
+                il.Emit(OpCodes.Ldloc, aneA);
+                il.Emit(OpCodes.Callvirt, typeof(object).GetMethod("ToString")!);
+                il.Emit(OpCodes.Call, typeof(string).GetMethod("Concat", [typeof(string), typeof(string)])!);
+                il.Emit(OpCodes.Newobj, typeof(Exception).GetConstructor([typeof(string)])!);
+                il.Emit(OpCodes.Throw);
+                il.MarkLabel(aneOk);
+                break;
+            }
+
             default:
                 // Unknown builtin — emit a nop and warning
                 _diagnostics.Warning("LEB4001", $"Unknown builtin function '{name}'", SourceSpan.None);
@@ -3623,6 +3689,24 @@ public sealed class CilEmitter
                 if (ReferenceEquals(block.Instructions[i], target) && i > 0)
                 {
                     return InferInstructionResultType(block.Instructions[i - 1], func);
+                }
+            }
+        }
+        return typeof(object);
+    }
+
+    /// <summary>
+    /// Infer the type of the second-from-top value on the stack (for 2-arg builtins like assert_equal).
+    /// </summary>
+    private Type InferSecondStackType(IrInstruction target, IrFunction func)
+    {
+        foreach (var block in func.Body)
+        {
+            for (int i = 0; i < block.Instructions.Count; i++)
+            {
+                if (ReferenceEquals(block.Instructions[i], target) && i > 1)
+                {
+                    return InferInstructionResultType(block.Instructions[i - 2], func);
                 }
             }
         }

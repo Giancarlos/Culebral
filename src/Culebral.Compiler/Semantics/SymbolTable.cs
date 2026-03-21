@@ -121,6 +121,10 @@ public static class BuiltinSymbols
         DeclareFunction(scope, "hash", [PrimitiveType.Object], PrimitiveType.Int);
         DeclareFunction(scope, "reversed", [PrimitiveType.Object], PrimitiveType.Object);
 
+        // Testing assertion helpers
+        DeclareFunction(scope, "assert_equal", [PrimitiveType.Object, PrimitiveType.Object], PrimitiveType.Void);
+        DeclareFunction(scope, "assert_not_equal", [PrimitiveType.Object, PrimitiveType.Object], PrimitiveType.Void);
+
         // Built-in Result type and Ok/Err constructors
         var resultType = new ClassType("Result", "Result");
         var okType = new ClassType("Ok", "Ok");

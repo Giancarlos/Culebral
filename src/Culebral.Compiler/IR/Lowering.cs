@@ -2105,6 +2105,7 @@ public sealed class IrLowering
                 "enumerate", "zip", "map", "filter", "open",
                 "input", "round", "chr", "ord",
                 "all", "any", "sum", "list", "dict", "set", "hash", "reversed",
+                "assert_equal", "assert_not_equal",
             };
 
             if (builtins.Contains(ident.Name))
@@ -3090,6 +3091,7 @@ public sealed class IrLowering
         {
             IrPrint => false, // void
             IrCallBuiltin { Name: "print" } => false, // void (legacy, shouldn't occur)
+            IrCallBuiltin { Name: "assert_equal" or "assert_not_equal" } => false, // void
             IrCallBuiltin => true,
             IrCall => true, // conservative — may be void but safer to pop
             IrCallMethod => true,

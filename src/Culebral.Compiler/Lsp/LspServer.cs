@@ -297,8 +297,135 @@ public sealed class LspServer
 
     private void HandleHover(JsonElement id, JsonElement @params)
     {
-        // MVP: return null (no hover info) — a future version can look up types
-        SendResponse(id, null);
+        if (@params.ValueKind == JsonValueKind.Undefined)
+        {
+            SendResponse(id, null);
+            return;
+        }
+
+        var textDocument = @params.GetProperty("textDocument");
+        var uri = textDocument.GetProperty("uri").GetString()!;
+        var position = @params.GetProperty("position");
+        var line = position.GetProperty("line").GetInt32();
+        var character = position.GetProperty("character").GetInt32();
+
+        var hoverContent = GetHoverInfo(uri, line, character);
+        if (hoverContent is null)
+        {
+            SendResponse(id, null);
+            return;
+        }
+
+        SendResponse(id, new
+        {
+            contents = new
+            {
+                kind = "markdown",
+                value = hoverContent,
+            },
+        });
+    }
+
+    /// <summary>
+    /// Compute hover information for the given document position.
+    /// Runs the compiler front-end (lex, parse, type-check) and looks up the type
+    /// of the token at the requested (line, character) position.
+    /// </summary>
+    private string? GetHoverInfo(string uri, int line, int character)
+    {
+        if (!_openDocuments.TryGetValue(uri, out var source)) return null;
+
+        var filePath = UriToFilePath(uri);
+        var diagnostics = new DiagnosticBag();
+
+        List<Lexer.Token> tokens;
+        try
+        {
+            var lexer = new CulebralLexer(source, filePath, diagnostics);
+            tokens = lexer.Tokenize();
+        }
+        catch
+        {
+            return null;
+        }
+
+        // Find token at position (LSP is 0-based, Culebral SourceLocation is 1-based)
+        var targetLine = line + 1;
+        var targetCol = character + 1;
+
+        var token = tokens.FirstOrDefault(t =>
+            t.Kind != Lexer.TokenKind.EndOfFile &&
+            t.Span.Start.Line == targetLine &&
+            t.Span.Start.Column <= targetCol &&
+            t.Span.Start.Column + t.Lexeme.Length > targetCol);
+
+        if (token.Kind == Lexer.TokenKind.EndOfFile) return null;
+
+        // For non-identifier tokens, show the token kind
+        if (token.Kind != Lexer.TokenKind.Identifier && token.Kind != Lexer.TokenKind.AtIdentifier)
+        {
+            return token.Kind switch
+            {
+                Lexer.TokenKind.IntegerLiteral => $"```\n(literal) int\n```",
+                Lexer.TokenKind.FloatLiteral => $"```\n(literal) float\n```",
+                Lexer.TokenKind.StringLiteral or Lexer.TokenKind.FStringLiteral => $"```\n(literal) str\n```",
+                Lexer.TokenKind.BoolLiteral => $"```\n(literal) bool\n```",
+                Lexer.TokenKind.NoneLiteral => $"```\n(literal) None\n```",
+                _ when token.Kind.ToString().StartsWith("Kw") => $"```\n(keyword) {token.Lexeme}\n```",
+                _ => null,
+            };
+        }
+
+        // Parse and type check to get type information
+        try
+        {
+            var parser = new CulebralParser(tokens, diagnostics);
+            var ast = parser.ParseCompilationUnit();
+            var typeChecker = new TypeChecker(diagnostics);
+            typeChecker.Check(ast);
+
+            // First: look for a resolved AST node whose span matches the token
+            foreach (var (node, type) in typeChecker.ResolvedTypes)
+            {
+                if (node.Span.Start.Line == targetLine &&
+                    node.Span.Start.Column == token.Span.Start.Column)
+                {
+                    var label = node switch
+                    {
+                        Parser.IdentifierExpr id => id.Name,
+                        Parser.FieldAccessExpr fa => $"@{fa.FieldName}",
+                        Parser.CallExpr call when call.Callee is Parser.IdentifierExpr ci => $"{ci.Name}(...)",
+                        _ => token.Lexeme,
+                    };
+                    return $"```\n{label}: {type.DisplayName}\n```";
+                }
+            }
+
+            // Fallback: look up the identifier name in the global scope
+            var name = token.Lexeme;
+            var symbol = typeChecker.GlobalScope.Lookup(name);
+            if (symbol is not null)
+            {
+                var kindLabel = symbol.Kind switch
+                {
+                    Semantics.SymbolKind.Function => "(function) ",
+                    Semantics.SymbolKind.Type => "(type) ",
+                    Semantics.SymbolKind.Variable => "(variable) ",
+                    Semantics.SymbolKind.Parameter => "(parameter) ",
+                    Semantics.SymbolKind.Field => "(field) ",
+                    Semantics.SymbolKind.Property => "(property) ",
+                    Semantics.SymbolKind.EnumVariant => "(enum) ",
+                    _ => "",
+                };
+                return $"```\n{kindLabel}{name}: {symbol.Type.DisplayName}\n```";
+            }
+        }
+        catch
+        {
+            // If parsing/type checking fails, we still tried
+        }
+
+        return null;
     }
 
     // ─── Diagnostics Pipeline ───

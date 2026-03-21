@@ -1,0 +1,43 @@
+# Testing in Culebral
+# Run with: culebral test samples/testing_example.leb
+#
+# Test functions start with test_ and use assert for verification.
+# The culebral test runner discovers them automatically.
+
+def test_arithmetic():
+    assert 2 + 2 == 4
+    assert 10 - 3 == 7
+    assert 4 * 5 == 20
+    assert 10 / 3 > 3.3
+
+def test_strings():
+    name = "Culebral"
+    assert len(name) == 8
+    assert "lebra" in name
+    assert name[0:4] == "Cule"
+
+def test_collections():
+    items = [1, 2, 3, 4, 5]
+    assert len(items) == 5
+    assert sum(items) == 15
+    assert min(items) == 1
+    assert max(items) == 5
+    assert sorted([3, 1, 2]) == [1, 2, 3]
+
+def test_result_type():
+    r = Ok(42)
+    assert r.is_ok
+    assert r.value == 42
+
+    e = Err("failed")
+    assert e.is_err
+    assert e.value == "failed"
+
+def test_truthiness():
+    assert True
+    assert 1
+    assert "hello"
+    assert [1, 2, 3]
+    assert not False
+    assert not 0
+    assert not ""

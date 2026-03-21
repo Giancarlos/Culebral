@@ -120,9 +120,18 @@ public sealed class CulebralParser
     {
         var start = Current.Span.Start;
         Advance(); // consume 'async'
+
+        // async for — Phase 1: compiles identically to regular for
+        if (Current.Kind == TokenKind.KwFor)
+            return ParseForStatement();
+
+        // async with — Phase 1: compiles identically to regular with
+        if (Current.Kind == TokenKind.KwWith)
+            return ParseWithStatement();
+
         if (Current.Kind != TokenKind.KwDef)
         {
-            _diagnostics.Error("LEB1001", "Expected 'def' after 'async'", Current.Span);
+            _diagnostics.Error("LEB1001", "Expected 'def', 'for', or 'with' after 'async'", Current.Span);
             return new PassStatement(SourceSpan.From(start));
         }
         return ParseFunctionDef(isAsync: true);
