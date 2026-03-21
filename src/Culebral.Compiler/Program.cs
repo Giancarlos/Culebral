@@ -3,6 +3,7 @@ using Culebral.Compiler.Diagnostics;
 using Culebral.Compiler.Emit;
 using Culebral.Compiler.IR;
 using Culebral.Compiler.Lexer;
+using Culebral.Compiler.Lsp;
 using Culebral.Compiler.NuGet;
 using Culebral.Compiler.Parser;
 using Culebral.Compiler.Semantics;
@@ -31,6 +32,7 @@ public static class Program
             "parse" => HandleParse(args[1..]),
             "ir" => HandleIr(args[1..]),
             "repl" => HandleRepl(),
+            "lsp" => HandleLsp(),
             "--version" or "-v" => HandleVersion(),
             "--help" or "-h" => HandleHelp(),
             _ => UnknownCommand(command),
@@ -223,6 +225,15 @@ public static class Program
         var module = lowering.Lower(ast, moduleName, args[0]);
 
         PrintIr(module);
+        return 0;
+    }
+
+    // ─── LSP Server ───
+
+    private static int HandleLsp()
+    {
+        var server = new LspServer(Console.OpenStandardInput(), Console.OpenStandardOutput());
+        server.Run();
         return 0;
     }
 
@@ -798,6 +809,7 @@ public static class Program
         Console.WriteLine("  parse <file.leb>     Print parse tree (debug)");
         Console.WriteLine("  ir <file.leb>        Print CulebralIR (debug)");
         Console.WriteLine("  repl                 Start interactive REPL session");
+        Console.WriteLine("  lsp                  Start Language Server Protocol server");
         Console.WriteLine();
         Console.WriteLine("Options:");
         Console.WriteLine("  --output, -o <path>  Output file path");
