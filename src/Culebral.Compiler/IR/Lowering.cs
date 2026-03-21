@@ -1903,6 +1903,13 @@ public sealed class IrLowering
     {
         if (_currentBlock is null || _currentFunction is null) return;
 
+        // 'self' in a class method → this reference (Python compatibility)
+        if (ident.Name == "self" && _currentDeclaringType is not null)
+        {
+            _currentBlock.Emit(new IrLoadThis(ident.Span));
+            return;
+        }
+
         // Check if it's a parameter
         var param = _currentFunction.Parameters.FirstOrDefault(p => p.Name == ident.Name);
         if (param is not null)

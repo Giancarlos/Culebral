@@ -859,8 +859,13 @@ public sealed class TypeChecker
             return narrowed;
 
         // 'self' in a class method refers to the current instance (Python compatibility)
-        if (ident.Name == "self")
+        if (ident.Name == "self" && _currentClassName is not null)
+        {
+            var classSymbol = _currentScope.Lookup(_currentClassName);
+            if (classSymbol is not null)
+                return classSymbol.Type;
             return PrimitiveType.Object;
+        }
 
         var symbol = _currentScope.Lookup(ident.Name);
         if (symbol is null)

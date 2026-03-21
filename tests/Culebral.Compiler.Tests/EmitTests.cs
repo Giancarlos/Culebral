@@ -3523,7 +3523,7 @@ public class EmitTests : IDisposable
     [Fact]
     public void Self_MixedWithCulebraStyle()
     {
-        // Uses self for field access + @field for disambiguation + returns
+        // self.field = self.field + param in void method (no return)
         var output = CompileAndRun("""
             class Point:
                 x: int = 0
@@ -3533,22 +3533,17 @@ public class EmitTests : IDisposable
                     @x = x
                     @y = y
 
-                def move_x(self, dx: int) -> int:
+                def move(self, dx: int, dy: int):
                     self.x = self.x + dx
-                    return self.x
-
-                def move_y(self, dy: int) -> int:
                     self.y = self.y + dy
-                    return self.y
 
-                def to_string() -> str:
+                def __str__() -> str:
                     return f"({@x}, {@y})"
 
             def main():
                 p = Point(1, 2)
-                p.move_x(3)
-                p.move_y(4)
-                print(p.to_string())
+                p.move(3, 4)
+                print(p)
             """);
         Assert.Equal("(4, 6)", output);
     }
