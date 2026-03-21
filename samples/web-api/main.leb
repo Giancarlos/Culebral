@@ -9,7 +9,7 @@
 #
 # Then: curl http://localhost:5000/
 
-from Microsoft.AspNetCore.Builder import WebApplication, EndpointRouteBuilderExtensions
+from Microsoft.AspNetCore.Builder import WebApplication
 from Microsoft.AspNetCore.Http import RequestDelegateFactory
 from Microsoft.Extensions.Hosting import HostingAbstractionsHostExtensions
 
@@ -19,13 +19,16 @@ def main():
 
     # Create the handler as a lambda, then wrap it into a RequestDelegate
     # using ASP.NET's RequestDelegateFactory (handles return type serialization)
-    handler = lambda: "Hello from Culebral on ASP.NET!"
+    handler = lambda: "Hello from ASP.NET!"
     rdf = RequestDelegateFactory.create(handler, None)
-    EndpointRouteBuilderExtensions.map_get(app, "/", rdf.request_delegate)
+    app.map_get("/", rdf.request_delegate)
 
     print("Culebral on ASP.NET!")
     print("Listening on http://localhost:5000")
     print("Try: curl http://localhost:5000/")
 
     app.urls.add("http://localhost:5000")
-    HostingAbstractionsHostExtensions.run(app)
+    app.run()
+
+
+

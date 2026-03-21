@@ -1096,7 +1096,11 @@ public sealed class CilEmitter
 
             case IrCallDotNetStatic { DeclaringType: var type, MethodName: var mname, ArgCount: var argc }:
             {
-                var method = FindDotNetMethod(type, mname, argc, isStatic: true);
+                // Infer argument types from the stack for overload resolution
+                var argTypes = new Type[argc];
+                for (int ai = 0; ai < argc; ai++)
+                    argTypes[ai] = InferNthArgType(instr, func, ai, argc);
+                var method = FindDotNetMethod(type, mname, argc, isStatic: true, argTypes);
                 if (method is not null)
                     il.Emit(OpCodes.Call, method);
                 else
@@ -1106,7 +1110,11 @@ public sealed class CilEmitter
 
             case IrCallDotNetInstance { DeclaringType: var type, MethodName: var mname, ArgCount: var argc }:
             {
-                var method = FindDotNetMethod(type, mname, argc, isStatic: false);
+                // Infer argument types from the stack for overload resolution
+                var argTypes = new Type[argc];
+                for (int ai = 0; ai < argc; ai++)
+                    argTypes[ai] = InferNthArgType(instr, func, ai, argc);
+                var method = FindDotNetMethod(type, mname, argc, isStatic: false, argTypes);
                 if (method is not null)
                     il.Emit(OpCodes.Callvirt, method);
                 else
@@ -1200,11 +1208,14 @@ public sealed class CilEmitter
             {
                 if (_methodBuilders.TryGetValue(mname, out var lambdaMb))
                 {
-                    // Build the Func<> delegate type using the lambda method's actual return type
-                    // instead of always object — this is critical for .NET interop (e.g., ASP.NET
+                    // Build the Func<> delegate type using the lambda method's actual parameter
+                    // and return types — this is critical for .NET interop (e.g., ASP.NET
                     // inspects the delegate signature to determine response serialization)
                     var returnType = lambdaMb.ReturnType ?? typeof(object);
-                    var paramTypes = Enumerable.Repeat(typeof(object), paramCount).ToArray();
+                    var methodParams = lambdaMb.GetParameters();
+                    var paramTypes = methodParams.Length == paramCount
+                        ? methodParams.Select(p => p.ParameterType ?? typeof(object)).ToArray()
+                        : Enumerable.Repeat(typeof(object), paramCount).ToArray();
                     var funcTypeArgs = paramTypes.Append(returnType).ToArray();
                     var delegateType = paramCount switch
                     {
@@ -4391,7 +4402,7 @@ public sealed class CilEmitter
         return typeof(object);
     }
 
-    private static MethodInfo? FindDotNetMethod(Type type, string name, int argCount, bool isStatic)
+    private static MethodInfo? FindDotNetMethod(Type type, string name, int argCount, bool isStatic, Type[]? argTypes = null)
     {
         var flags = BindingFlags.Public | BindingFlags.FlattenHierarchy |
                     (isStatic ? BindingFlags.Static : BindingFlags.Instance);
@@ -4412,7 +4423,15 @@ public sealed class CilEmitter
         if (candidates.Length <= 1)
             return candidates.FirstOrDefault();
 
-        // Overload resolution: prefer common Culebral types
+        // If we have actual argument types, score overloads by type compatibility
+        if (argTypes is not null && argTypes.Length > 0)
+        {
+            return candidates
+                .OrderByDescending(m => ScoreOverload(m, argTypes))
+                .First();
+        }
+
+        // Fallback: prefer common Culebral types when no arg type info is available
         return candidates
             .OrderByDescending(m => m.GetParameters().Sum(p => p.ParameterType switch
             {
@@ -4425,6 +4444,33 @@ public sealed class CilEmitter
                 _ => 0,
             }))
             .First();
+    }
+
+    /// <summary>
+    /// Score a method overload by how well its parameter types match the actual argument types.
+    /// Higher score = better match. Exact type match scores highest, then assignable, then object fallback.
+    /// </summary>
+    private static int ScoreOverload(MethodInfo method, Type[] argTypes)
+    {
+        var parameters = method.GetParameters();
+        int score = 0;
+        for (int i = 0; i < parameters.Length && i < argTypes.Length; i++)
+        {
+            var paramType = parameters[i].ParameterType;
+            var argType = argTypes[i];
+
+            // Skip scoring if we don't know the arg type (typeof(object) from InferNthArgType fallback)
+            if (argType == typeof(object) && paramType != typeof(object))
+                continue;
+
+            if (argType == paramType)
+                score += 3; // exact match
+            else if (paramType.IsAssignableFrom(argType))
+                score += 2; // compatible (e.g., Delegate assignable from RequestDelegate)
+            else if (paramType == typeof(object))
+                score += 1; // object fallback
+        }
+        return score;
     }
 
     /// <summary>
@@ -4743,6 +4789,12 @@ public sealed class CilEmitter
 
     private Type ResolveClrType(CulebralType type)
     {
+        // GenericInstanceType must go through ResolveGenericClrType to get concrete
+        // type arguments (e.g., List<int> instead of List<object>) — skip the ClrType
+        // short-circuit which would return the erased type from the type checker.
+        if (type is GenericInstanceType g)
+            return ResolveGenericClrType(g);
+
         if (type.ClrType is not null)
             return type.ClrType;
 
@@ -4750,7 +4802,6 @@ public sealed class CilEmitter
         {
             PrimitiveType p => p.ClrBackingType,
             NullableCulebralType n => ResolveClrType(n.Inner),
-            GenericInstanceType g => ResolveGenericClrType(g),
             ClassType c => _typeBuilders.TryGetValue(c.Name, out var tb) ? tb : typeof(object),
             StructType s => _typeBuilders.TryGetValue(s.Name, out var tb) ? tb : typeof(object),
             RecordType r => _typeBuilders.TryGetValue(r.Name, out var tb) ? tb : typeof(object),
@@ -4763,9 +4814,22 @@ public sealed class CilEmitter
 
     private Type ResolveGenericClrType(GenericInstanceType generic)
     {
+        // Resolve type arguments to concrete CLR types (e.g., int, string)
+        // so we get List<int> instead of List<object>.
+        var typeArgs = generic.TypeArgs.Select(ResolveClrType).ToArray();
+
         return generic.Name switch
         {
-            "list" => typeof(List<object>), // Simplified
+            "list" when typeArgs.Length >= 1 =>
+                typeof(List<>).MakeGenericType(typeArgs[0]),
+            "dict" when typeArgs.Length >= 2 =>
+                typeof(Dictionary<,>).MakeGenericType(typeArgs[0], typeArgs[1]),
+            "set" when typeArgs.Length >= 1 =>
+                typeof(HashSet<>).MakeGenericType(typeArgs[0]),
+            "array" when typeArgs.Length >= 1 =>
+                typeArgs[0].MakeArrayType(),
+            // Fallback: use erased types when type args are missing or unresolvable
+            "list" => typeof(List<object>),
             "dict" => typeof(Dictionary<object, object>),
             "set" => typeof(HashSet<object>),
             "array" => typeof(object[]),

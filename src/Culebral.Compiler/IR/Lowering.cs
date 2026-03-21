@@ -44,6 +44,9 @@ public sealed class IrLowering
     // Extension method sources: types that have been imported and contain extension methods
     private readonly List<Type> _extensionMethodSources = new();
 
+    // Track namespaces already scanned for extension methods to avoid duplicate work
+    private readonly HashSet<string> _scannedExtensionNamespaces = new();
+
     // Module reference for adding generated lambda methods
     private IrModule? _module;
     private int _lambdaCounter;
@@ -2285,11 +2288,19 @@ public sealed class IrLowering
             // .NET instance method: obj.get_async(...) where obj is a .NET type instance
             if (objType is DotNetType dotNetObjType)
             {
-                LowerExpression(member.Object);
-                foreach (var arg in call.Arguments)
-                    LowerExpression(arg.Value);
-                _currentBlock.Emit(new IrCallDotNetInstance(dotNetObjType.ClrBackingType, methodName, call.Arguments.Count, call.Span));
-                return;
+                // Check if the method actually exists on the type before emitting an instance call.
+                // If not, fall through to extension method resolution (e.g., app.map_get → MapGet extension).
+                var resolver2 = _typeChecker.DotNetResolver;
+                var instanceMethod = resolver2.ResolveMethod(dotNetObjType.ClrBackingType, member.Member, call.Arguments.Count, isStatic: false);
+                if (instanceMethod is not null)
+                {
+                    LowerExpression(member.Object);
+                    foreach (var arg in call.Arguments)
+                        LowerExpression(arg.Value);
+                    _currentBlock.Emit(new IrCallDotNetInstance(dotNetObjType.ClrBackingType, methodName, call.Arguments.Count, call.Span));
+                    return;
+                }
+                // Method not found on the type — fall through to extension method check below
             }
 
             // Extension method check: obj.method(args) where method is an extension on a known type
@@ -2329,6 +2340,17 @@ public sealed class IrLowering
                         return;
                     }
                 }
+            }
+
+            // DotNetType fallback: emit instance call even if method wasn't found above
+            // (the emitter will produce a diagnostic for unresolvable methods)
+            if (objType is DotNetType dotNetObjTypeFallback)
+            {
+                LowerExpression(member.Object);
+                foreach (var arg in call.Arguments)
+                    LowerExpression(arg.Value);
+                _currentBlock.Emit(new IrCallDotNetInstance(dotNetObjTypeFallback.ClrBackingType, methodName, call.Arguments.Count, call.Span));
+                return;
             }
 
             // Culebral user-defined type method call
@@ -3317,6 +3339,52 @@ public sealed class IrLowering
                 // Track types that contain extension methods for later resolution
                 if (HasExtensionMethods(clrType))
                     _extensionMethodSources.Add(clrType);
+            }
+        }
+
+        // Scan the imported namespace for ALL extension method types.
+        // This enables C#-style extension method resolution: when you import from a namespace,
+        // all extension methods defined in that namespace become available on compatible receivers.
+        // E.g., `from Microsoft.AspNetCore.Builder import WebApplication` also makes
+        // EndpointRouteBuilderExtensions.MapGet available as app.map_get(...)
+        ScanNamespaceForExtensionMethods(fromImport.ModulePath);
+    }
+
+    /// <summary>
+    /// Scan all loaded assemblies for types in the given namespace that define extension methods,
+    /// and register them as extension method sources for instance-style resolution.
+    /// </summary>
+    private void ScanNamespaceForExtensionMethods(string namespaceName)
+    {
+        if (!_scannedExtensionNamespaces.Add(namespaceName))
+            return; // Already scanned
+
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type[] types;
+            try
+            {
+                types = assembly.GetTypes();
+            }
+            catch (System.Reflection.ReflectionTypeLoadException ex)
+            {
+                // Some assemblies may have types that can't be loaded — use what we can
+                types = ex.Types.Where(t => t is not null).ToArray()!;
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (var type in types)
+            {
+                if (type.Namespace != namespaceName)
+                    continue;
+                if (!HasExtensionMethods(type))
+                    continue;
+                if (_extensionMethodSources.Contains(type))
+                    continue;
+                _extensionMethodSources.Add(type);
             }
         }
     }
