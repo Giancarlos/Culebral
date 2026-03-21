@@ -1,3 +1,4 @@
+using System.Text;
 using Culebral.Compiler.Diagnostics;
 using Culebral.Compiler.Emit;
 using Culebral.Compiler.IR;
@@ -24,9 +25,12 @@ public static class Program
             "build" => HandleBuild(args[1..]),
             "run" => HandleRun(args[1..]),
             "check" => HandleCheck(args[1..]),
+            "test" => HandleTest(args[1..]),
+            "fmt" => HandleFmt(args[1..]),
             "lex" => HandleLex(args[1..]),
             "parse" => HandleParse(args[1..]),
             "ir" => HandleIr(args[1..]),
+            "repl" => HandleRepl(),
             "--version" or "-v" => HandleVersion(),
             "--help" or "-h" => HandleHelp(),
             _ => UnknownCommand(command),
@@ -220,6 +224,290 @@ public static class Program
 
         PrintIr(module);
         return 0;
+    }
+
+    // ─── REPL ───
+
+    private static int HandleRepl()
+    {
+        Console.WriteLine("Culebral 0.1.0-alpha (interactive mode)");
+        Console.WriteLine("Type expressions or statements. Blank line after indented block to execute.");
+        Console.WriteLine("Type 'exit' or 'quit' to leave.");
+        Console.WriteLine();
+
+        var definitions = new StringBuilder();
+
+        while (true)
+        {
+            Console.Write(">>> ");
+            var line = Console.ReadLine();
+            if (line is null) break; // EOF
+            if (line.Trim() is "exit" or "quit") break;
+
+            // Detect multi-line input
+            var input = new StringBuilder(line);
+            if (line.TrimEnd().EndsWith(':'))
+            {
+                while (true)
+                {
+                    Console.Write("... ");
+                    var cont = Console.ReadLine();
+                    if (cont is null || cont.Trim() == "") break;
+                    input.AppendLine();
+                    input.Append(cont);
+                }
+            }
+
+            var code = input.ToString().Trim();
+            if (string.IsNullOrEmpty(code)) continue;
+
+            // Check if it's a definition (def, class, struct, record, enum, interface, import, from, type, async def)
+            bool isDef = code.StartsWith("def ") || code.StartsWith("class ") ||
+                         code.StartsWith("struct ") || code.StartsWith("record ") ||
+                         code.StartsWith("enum ") || code.StartsWith("interface ") ||
+                         code.StartsWith("import ") || code.StartsWith("from ") ||
+                         code.StartsWith("type ") || code.StartsWith("async def ");
+
+            if (isDef)
+            {
+                // Save current definitions in case we need to roll back
+                var previousDefs = definitions.ToString();
+                definitions.AppendLine(code);
+                definitions.AppendLine();
+
+                // Try to compile to check for errors
+                var testSource = definitions + "def main():\n    pass\n";
+                var (success, _, errors) = ExecuteSource(testSource, "<repl>");
+                if (!success)
+                {
+                    // Roll back the bad definition
+                    definitions.Clear();
+                    definitions.Append(previousDefs);
+                    Console.Error.WriteLine(errors);
+                }
+            }
+            else
+            {
+                // Expression or statement — wrap in main() and execute
+                var indented = string.Join("\n", code.Split('\n').Select(l => "    " + l));
+                var source = definitions + $"def main():\n{indented}\n";
+
+                var (success, output, errors) = ExecuteSource(source, "<repl>");
+                if (success)
+                {
+                    if (!string.IsNullOrEmpty(output))
+                        Console.Write(output);
+                }
+                else
+                {
+                    Console.Error.WriteLine(errors);
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    // ─── Test Runner ───
+
+    private static int HandleTest(string[] args)
+    {
+        if (args.Length == 0)
+        {
+            Console.Error.WriteLine("Usage: culebral test <file.leb>");
+            return 1;
+        }
+
+        var filePath = args[0];
+        if (!File.Exists(filePath))
+        {
+            Console.Error.WriteLine($"Error: File not found: {filePath}");
+            return 1;
+        }
+
+        var source = File.ReadAllText(filePath);
+
+        // Parse to find test functions
+        var diagnostics = new DiagnosticBag();
+        var lexer = new CulebralLexer(source, filePath, diagnostics);
+        var tokens = lexer.Tokenize();
+        if (diagnostics.HasErrors)
+        {
+            Console.Error.Write(diagnostics.FormatAll());
+            return 1;
+        }
+
+        var parser = new CulebralParser(tokens, diagnostics);
+        var ast = parser.ParseCompilationUnit();
+        if (diagnostics.HasErrors)
+        {
+            Console.Error.Write(diagnostics.FormatAll());
+            return 1;
+        }
+
+        var testFunctions = ast.Statements
+            .OfType<FunctionDef>()
+            .Where(f => f.Name.StartsWith("test_"))
+            .Select(f => f.Name)
+            .ToList();
+
+        if (testFunctions.Count == 0)
+        {
+            Console.WriteLine("No test functions found (functions must start with 'test_')");
+            return 0;
+        }
+
+        Console.WriteLine($"Running {testFunctions.Count} tests...");
+
+        // Generate a main() that calls each test function wrapped in try/except
+        var runner = new StringBuilder();
+        runner.AppendLine(source);
+        runner.AppendLine();
+        runner.AppendLine("def main():");
+        runner.AppendLine("    __passed = 0");
+        runner.AppendLine("    __failed = 0");
+
+        foreach (var testName in testFunctions)
+        {
+            runner.AppendLine("    try:");
+            runner.AppendLine($"        {testName}()");
+            runner.AppendLine($"        print(\"  {testName} ... PASS\")");
+            runner.AppendLine("        __passed += 1");
+            runner.AppendLine("    except Exception as __e:");
+            runner.AppendLine($"        print(f\"  {testName} ... FAIL: {{__e}}\")");
+            runner.AppendLine("        __failed += 1");
+        }
+
+        runner.AppendLine();
+        runner.AppendLine("    print()");
+        runner.AppendLine("    print(f\"{__passed} passed, {__failed} failed\")");
+        runner.AppendLine("    if __failed > 0:");
+        runner.AppendLine("        raise Exception(\"Tests failed\")");
+
+        var testSource = runner.ToString();
+
+        // Compile and run the generated source
+        var (success, output, errors) = ExecuteSource(testSource, filePath);
+
+        if (!string.IsNullOrEmpty(output))
+            Console.Write(output);
+
+        if (success)
+        {
+            return 0;
+        }
+        else
+        {
+            // If compilation failed, show compiler errors
+            if (!string.IsNullOrEmpty(errors))
+                Console.Error.Write(errors);
+            return 1;
+        }
+    }
+
+    // ─── Formatter ───
+
+    private static int HandleFmt(string[] args)
+    {
+        bool checkOnly = false;
+        string? filePath = null;
+
+        foreach (var arg in args)
+        {
+            if (arg is "--check") checkOnly = true;
+            else filePath = arg;
+        }
+
+        if (filePath is null)
+        {
+            Console.Error.WriteLine("Usage: culebral fmt [--check] <file.leb>");
+            return 1;
+        }
+
+        if (!File.Exists(filePath))
+        {
+            Console.Error.WriteLine($"Error: File not found: {filePath}");
+            return 1;
+        }
+
+        var original = File.ReadAllText(filePath);
+        var formatted = FormatSource(original);
+
+        if (checkOnly)
+        {
+            if (original == formatted)
+            {
+                Console.WriteLine($"  {filePath}: already formatted");
+                return 0;
+            }
+            else
+            {
+                Console.WriteLine($"  {filePath}: would be reformatted");
+                return 1;
+            }
+        }
+
+        if (original != formatted)
+        {
+            File.WriteAllText(filePath, formatted);
+            Console.WriteLine($"  Formatted: {filePath}");
+        }
+        else
+        {
+            Console.WriteLine($"  {filePath}: already formatted");
+        }
+        return 0;
+    }
+
+    public static string FormatSource(string source)
+    {
+        var lines = source.Split('\n');
+        var result = new List<string>();
+        int consecutiveBlanks = 0;
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i].TrimEnd(); // strip trailing whitespace (including \r)
+
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                consecutiveBlanks++;
+                if (consecutiveBlanks <= 2) // collapse 3+ blanks to 2
+                    result.Add("");
+                continue;
+            }
+
+            // Two blank lines before top-level def/class (not indented)
+            if (!line.StartsWith(' ') && !line.StartsWith('\t') &&
+                (line.StartsWith("def ") || line.StartsWith("async def ") ||
+                 line.StartsWith("class ") || line.StartsWith("struct ") ||
+                 line.StartsWith("record ") || line.StartsWith("enum ") ||
+                 line.StartsWith("interface ")))
+            {
+                // Ensure exactly 2 blank lines before (unless it's the first non-blank content)
+                if (result.Count > 0)
+                {
+                    // Remove existing trailing blanks
+                    while (result.Count > 0 && string.IsNullOrEmpty(result[^1]))
+                        result.RemoveAt(result.Count - 1);
+                    // Add exactly 2 blank lines
+                    if (result.Count > 0)
+                    {
+                        result.Add("");
+                        result.Add("");
+                    }
+                }
+            }
+
+            consecutiveBlanks = 0;
+            result.Add(line);
+        }
+
+        // Ensure single trailing newline
+        while (result.Count > 0 && string.IsNullOrEmpty(result[^1]))
+            result.RemoveAt(result.Count - 1);
+
+        return string.Join("\n", result) + "\n";
     }
 
     // ─── Core Compilation Pipeline ───
@@ -504,9 +792,12 @@ public static class Program
         Console.WriteLine("  build <file.leb>     Compile a Culebral source file to .NET assembly");
         Console.WriteLine("  run <file.leb>       Compile and run a Culebral source file");
         Console.WriteLine("  check <file.leb>     Type-check without compiling");
+        Console.WriteLine("  test <file.leb>      Discover and run test_ functions");
+        Console.WriteLine("  fmt <file.leb>       Format source file to canonical style");
         Console.WriteLine("  lex <file.leb>       Print lexer tokens (debug)");
         Console.WriteLine("  parse <file.leb>     Print parse tree (debug)");
         Console.WriteLine("  ir <file.leb>        Print CulebralIR (debug)");
+        Console.WriteLine("  repl                 Start interactive REPL session");
         Console.WriteLine();
         Console.WriteLine("Options:");
         Console.WriteLine("  --output, -o <path>  Output file path");

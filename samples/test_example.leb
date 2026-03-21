@@ -1,0 +1,20 @@
+# Example test file — run with: culebral test samples/test_example.leb
+
+def test_arithmetic():
+    assert 1 + 1 == 2
+    assert 10 - 3 == 7
+    assert 4 * 5 == 20
+
+def test_strings():
+    name = "Culebral"
+    assert len(name) == 8
+
+def test_list_basics():
+    items = [1, 2, 3]
+    assert len(items) == 3
+
+def test_truthiness():
+    assert True
+    assert not False
+    assert 42
+    assert "hello"

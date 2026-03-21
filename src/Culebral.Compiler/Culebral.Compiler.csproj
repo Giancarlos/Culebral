@@ -21,4 +21,8 @@
     <RepositoryUrl>https://github.com/Giancarlos/Culebral</RepositoryUrl>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Culebral.Compiler.Tests" />
+  </ItemGroup>
+
 </Project>
