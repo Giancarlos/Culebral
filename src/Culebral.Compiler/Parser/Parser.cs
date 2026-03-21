@@ -177,9 +177,19 @@ public sealed class CulebralParser
         TypeAnnotation type;
 
         if (TryConsume(TokenKind.Colon))
+        {
             type = ParseTypeAnnotation();
+        }
+        else if (name == "self")
+        {
+            // 'self' is the only parameter allowed without a type annotation
+            type = new SimpleType("object", SourceSpan.From(start));
+        }
         else
-            type = new SimpleType("object", SourceSpan.From(start)); // untyped param defaults to object
+        {
+            _diagnostics.Error("LEB1008", $"Parameter '{name}' requires a type annotation (e.g., {name}: int)", new SourceSpan(start, CurrentLocation()));
+            type = new SimpleType("object", SourceSpan.From(start)); // recover gracefully
+        }
 
         Expression? defaultValue = null;
         if (TryConsume(TokenKind.Assign))

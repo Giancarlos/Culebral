@@ -1578,7 +1578,7 @@ public class EmitTests : IDisposable
     public void Lambda_BasicExpression()
     {
         var output = CompileAndRun("""
-            def apply(f, x: int) -> object:
+            def apply(f: object, x: int) -> object:
                 return f(x)
 
             def main():
