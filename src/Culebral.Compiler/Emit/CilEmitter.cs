@@ -378,8 +378,15 @@ public sealed class CilEmitter
         if (typeDef.Kind == IrTypeKind.Interface && !isInterfaceDefaultMethod)
             return;
 
-        var il = mb.GetILGenerator();
-        EmitFunctionBodyWithDebugInfo(il, method, mb, _sourcePath);
+        if (method.IsAsync && HasAwaitPoints(method))
+        {
+            EmitAsyncStateMachine(mb, method, tb);
+        }
+        else
+        {
+            var il = mb.GetILGenerator();
+            EmitFunctionBodyWithDebugInfo(il, method, mb, _sourcePath);
+        }
     }
 
     /// <summary>
@@ -648,8 +655,15 @@ public sealed class CilEmitter
         // Pass 2: Emit all method bodies (all methods are now resolvable)
         foreach (var (func, mb) in functionsToEmit)
         {
-            var il = mb.GetILGenerator();
-            EmitFunctionBodyWithDebugInfo(il, func, mb, _sourcePath);
+            if (func.IsAsync && HasAwaitPoints(func))
+            {
+                EmitAsyncStateMachine(mb, func, programType);
+            }
+            else
+            {
+                var il = mb.GetILGenerator();
+                EmitFunctionBodyWithDebugInfo(il, func, mb, _sourcePath);
+            }
         }
 
         programType.CreateType();
@@ -1625,7 +1639,7 @@ public sealed class CilEmitter
 
     private void EmitAwait(ILGenerator il, bool hasResult)
     {
-        // Stack has: Task or Task<object>
+        // Synchronous fallback: Stack has: Task or Task<object>
         if (hasResult)
         {
             // Cast to Task<object> and get Result property (blocks until complete)
@@ -1639,6 +1653,528 @@ public sealed class CilEmitter
             il.Emit(OpCodes.Castclass, typeof(System.Threading.Tasks.Task));
             il.Emit(OpCodes.Callvirt, typeof(System.Threading.Tasks.Task)
                 .GetMethod("Wait", Type.EmptyTypes)!);
+        }
+    }
+
+    // ─── Async State Machine Emission ───
+
+    /// <summary>
+    /// Checks whether an IrFunction contains any IrAwait instructions.
+    /// </summary>
+    private static bool HasAwaitPoints(IrFunction func)
+    {
+        foreach (var block in func.Body)
+            foreach (var instr in block.Instructions)
+                if (instr is IrAwait)
+                    return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Counts the number of IrAwait instructions in a function.
+    /// </summary>
+    private static int CountAwaitPoints(IrFunction func)
+    {
+        int count = 0;
+        foreach (var block in func.Body)
+            foreach (var instr in block.Instructions)
+                if (instr is IrAwait)
+                    count++;
+        return count;
+    }
+
+    /// <summary>
+    /// Emits a true async state machine for a function that contains await points.
+    /// Creates a nested state machine type, rewrites the stub method to start it,
+    /// and emits MoveNext() with suspension/resumption logic.
+    /// </summary>
+    private void EmitAsyncStateMachine(MethodBuilder stubMethod, IrFunction func, TypeBuilder parentType)
+    {
+        var awaitCount = CountAwaitPoints(func);
+        var innerReturnType = ResolveClrType(func.ReturnType);
+        bool isVoidAsync = innerReturnType == typeof(void);
+
+        // The builder type: AsyncTaskMethodBuilder<object> for value-returning, AsyncTaskMethodBuilder for void
+        var builderType = isVoidAsync
+            ? typeof(System.Runtime.CompilerServices.AsyncTaskMethodBuilder)
+            : typeof(System.Runtime.CompilerServices.AsyncTaskMethodBuilder<>).MakeGenericType(typeof(object));
+
+        // ── A. Define the state machine struct ──
+        var smName = $"<{func.Name}>d__StateMachine";
+        var smType = _moduleBuilder.DefineType(smName,
+            TypeAttributes.NotPublic | TypeAttributes.Sealed | TypeAttributes.SequentialLayout,
+            typeof(ValueType));
+        smType.AddInterfaceImplementation(typeof(System.Runtime.CompilerServices.IAsyncStateMachine));
+
+        // Fields
+        var stateField = smType.DefineField("<>1__state", typeof(int), FieldAttributes.Public);
+        var builderField = smType.DefineField("<>t__builder", builderType, FieldAttributes.Public);
+
+        // Argument fields (one per parameter)
+        var argFields = new FieldBuilder[func.Parameters.Count];
+        for (int i = 0; i < func.Parameters.Count; i++)
+        {
+            argFields[i] = smType.DefineField($"<>__arg_{i}", typeof(object), FieldAttributes.Public);
+        }
+
+        // Local fields (hoisted locals — one per IR local)
+        var localFields = new FieldBuilder[func.Locals.Count];
+        for (int i = 0; i < func.Locals.Count; i++)
+        {
+            localFields[i] = smType.DefineField($"<>__local_{i}", typeof(object), FieldAttributes.Public);
+        }
+
+        // Awaiter fields (one per await point) — always void TaskAwaiter since we use
+        // base Task.GetAwaiter() for the suspension mechanism (works for both Task and Task<T>)
+        var voidTaskAwaiterType = typeof(System.Runtime.CompilerServices.TaskAwaiter);
+        var awaiterFields = new FieldBuilder[awaitCount];
+        for (int i = 0; i < awaitCount; i++)
+        {
+            awaiterFields[i] = smType.DefineField($"<>u__{i}", voidTaskAwaiterType, FieldAttributes.Public);
+        }
+
+        // ── B. Emit the stub method body ──
+        {
+            var il = stubMethod.GetILGenerator();
+            var smLocal = il.DeclareLocal(smType);
+
+            // Initialize state machine: zero-init struct
+            il.Emit(OpCodes.Ldloca, smLocal);
+            il.Emit(OpCodes.Initobj, smType);
+
+            // Set state = -1
+            il.Emit(OpCodes.Ldloca, smLocal);
+            il.Emit(OpCodes.Ldc_I4_M1);
+            il.Emit(OpCodes.Stfld, stateField);
+
+            // Set builder = AsyncTaskMethodBuilder<object>.Create()
+            il.Emit(OpCodes.Ldloca, smLocal);
+            il.Emit(OpCodes.Call, builderType.GetMethod("Create", BindingFlags.Public | BindingFlags.Static)!);
+            il.Emit(OpCodes.Stfld, builderField);
+
+            // Copy parameters to arg fields
+            for (int i = 0; i < func.Parameters.Count; i++)
+            {
+                il.Emit(OpCodes.Ldloca, smLocal);
+                EmitLoadArg(il, func.IsStatic ? i : i + 1); // +1 for instance 'this'
+                // Box value types to object
+                var paramType = ResolveClrType(func.Parameters[i].Type);
+                if (paramType.IsValueType)
+                    il.Emit(OpCodes.Box, paramType);
+                il.Emit(OpCodes.Stfld, argFields[i]);
+            }
+
+            // builder.Start<SM>(ref stateMachine)
+            // For PersistedAssemblyBuilder, we use IAsyncStateMachine as the type argument
+            // since TypeBuilder cannot be used with MakeGenericMethod in this context.
+            var startMethod = builderType.GetMethod("Start")!;
+            var startGeneric = startMethod.MakeGenericMethod(typeof(System.Runtime.CompilerServices.IAsyncStateMachine));
+            // We need to box to IAsyncStateMachine since Start expects ref TStateMachine
+            // Actually, Start<TStateMachine>(ref TStateMachine) requires the exact type.
+            // With PersistedAssemblyBuilder we can't use TypeBuilder as generic arg.
+            // Workaround: manually emit the call to Start via IAsyncStateMachine interface.
+
+            // Alternative: call builder.Start by casting to IAsyncStateMachine
+            // Actually the cleanest approach for PersistedAssemblyBuilder is to box the struct
+            // and call Start<IAsyncStateMachine>.
+            // But Start takes `ref TStateMachine` — boxing would lose the reference.
+            //
+            // The correct approach: try MakeGenericMethod with the TypeBuilder first.
+            // If it fails at emit time, we'll know.
+            try
+            {
+                var startWithSm = startMethod.MakeGenericMethod(smType);
+                il.Emit(OpCodes.Ldloca, smLocal);
+                il.Emit(OpCodes.Ldflda, builderField);
+                il.Emit(OpCodes.Ldloca, smLocal);
+                il.Emit(OpCodes.Call, startWithSm);
+            }
+            catch
+            {
+                // Fallback: use IAsyncStateMachine — box the struct, pass by ref
+                // This path shouldn't normally be hit with .NET 10
+                il.Emit(OpCodes.Ldloca, smLocal);
+                il.Emit(OpCodes.Ldflda, builderField);
+                il.Emit(OpCodes.Ldloca, smLocal);
+                il.Emit(OpCodes.Call, startMethod.MakeGenericMethod(typeof(System.Runtime.CompilerServices.IAsyncStateMachine)));
+            }
+
+            // return builder.Task
+            if (isVoidAsync)
+            {
+                il.Emit(OpCodes.Ldloca, smLocal);
+                il.Emit(OpCodes.Ldflda, builderField);
+                il.Emit(OpCodes.Call, builderType.GetProperty("Task")!.GetGetMethod()!);
+            }
+            else
+            {
+                il.Emit(OpCodes.Ldloca, smLocal);
+                il.Emit(OpCodes.Ldflda, builderField);
+                il.Emit(OpCodes.Call, builderType.GetProperty("Task")!.GetGetMethod()!);
+            }
+            il.Emit(OpCodes.Ret);
+        }
+
+        // ── C. Emit MoveNext() ──
+        {
+            var moveNextMethod = smType.DefineMethod("MoveNext",
+                MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.Final | MethodAttributes.NewSlot,
+                typeof(void), Type.EmptyTypes);
+
+            var il = moveNextMethod.GetILGenerator();
+
+            // Local 0: state (int)
+            var stateLocal = il.DeclareLocal(typeof(int));
+            // Local 1: result (object) — only for value-returning async
+            LocalBuilder? resultLocal = isVoidAsync ? null : il.DeclareLocal(typeof(object));
+            // Local 2: scratch for store-to-field pattern
+            var scratchLocal = il.DeclareLocal(typeof(object));
+            // Awaiter temp local (void TaskAwaiter — used for all await points)
+            var awaiterTempVoid = il.DeclareLocal(voidTaskAwaiterType);
+
+            // Load state
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldfld, stateField);
+            il.Emit(OpCodes.Stloc, stateLocal);
+
+            // Define labels for resumption points
+            var resumeLabels = new Label[awaitCount];
+            for (int i = 0; i < awaitCount; i++)
+                resumeLabels[i] = il.DefineLabel();
+
+            // Labels outside the try/catch
+            var successLabel = il.DefineLabel();  // success path: set state=-2, SetResult
+            var returnLabel = il.DefineLabel();   // final return (just ret)
+
+            // Begin try block
+            il.BeginExceptionBlock();
+
+            // State dispatch switch: if state >= 0 && state < awaitCount, jump to resume point
+            if (awaitCount > 0)
+            {
+                // switch(state) { case 0: goto Resume_0; case 1: goto Resume_1; ... }
+                il.Emit(OpCodes.Ldloc, stateLocal);
+                il.Emit(OpCodes.Switch, resumeLabels);
+            }
+
+            // ── Emit the function body with rewrites ──
+            // Create labels for all basic blocks
+            var blockLabels = new Dictionary<string, Label>();
+            foreach (var block in func.Body)
+                blockLabels[block.Label] = il.DefineLabel();
+
+            foreach (var block in func.Body)
+            {
+                il.MarkLabel(blockLabels[block.Label]);
+
+                foreach (var instr in block.Instructions)
+                {
+                    switch (instr)
+                    {
+                        case IrLoadLocal { Index: var idx }:
+                        {
+                            // Hoisted: ldarg.0; ldfld <>__local_{idx}; unbox if value type
+                            il.Emit(OpCodes.Ldarg_0);
+                            il.Emit(OpCodes.Ldfld, localFields[idx]);
+                            var localClrType = idx < func.Locals.Count ? ResolveClrType(func.Locals[idx].Type) : typeof(object);
+                            if (localClrType.IsValueType)
+                                il.Emit(OpCodes.Unbox_Any, localClrType);
+                            break;
+                        }
+
+                        case IrStoreLocal { Index: var idx }:
+                        {
+                            // Hoisted: box if value type, then stloc scratch; ldarg.0; ldloc scratch; stfld
+                            var localClrType = idx < func.Locals.Count ? ResolveClrType(func.Locals[idx].Type) : typeof(object);
+                            if (localClrType.IsValueType)
+                                il.Emit(OpCodes.Box, localClrType);
+                            il.Emit(OpCodes.Stloc, scratchLocal);
+                            il.Emit(OpCodes.Ldarg_0);
+                            il.Emit(OpCodes.Ldloc, scratchLocal);
+                            il.Emit(OpCodes.Stfld, localFields[idx]);
+                            break;
+                        }
+
+                        case IrLoadArg { Index: var idx }:
+                            if (!func.IsStatic && idx == 0)
+                            {
+                                // 'this' — not used for top-level static async functions
+                                il.Emit(OpCodes.Ldarg_0);
+                            }
+                            else
+                            {
+                                // Load from arg field. For static functions arg index == param index.
+                                // For instance methods, arg 0 is 'this', so param index = arg index - 1.
+                                var paramIdx = func.IsStatic ? idx : idx - 1;
+                                if (paramIdx >= 0 && paramIdx < argFields.Length)
+                                {
+                                    il.Emit(OpCodes.Ldarg_0);
+                                    il.Emit(OpCodes.Ldfld, argFields[paramIdx]);
+                                }
+                                else
+                                {
+                                    il.Emit(OpCodes.Ldnull); // fallback
+                                }
+                            }
+                            break;
+
+                        case IrLoadThis:
+                            // In a state machine, 'this' of the state machine is arg 0
+                            il.Emit(OpCodes.Ldarg_0);
+                            break;
+
+                        case IrReturn { HasValue: false }:
+                            // Void return: leave to success label
+                            il.Emit(OpCodes.Leave, successLabel);
+                            break;
+
+                        case IrReturn { HasValue: true }:
+                            if (!isVoidAsync)
+                            {
+                                // Box value types if needed
+                                var retClrType = ResolveClrType(func.ReturnType);
+                                if (retClrType.IsValueType)
+                                    il.Emit(OpCodes.Box, retClrType);
+                                il.Emit(OpCodes.Stloc, resultLocal!);
+                            }
+                            else
+                            {
+                                il.Emit(OpCodes.Pop); // discard value for void async
+                            }
+                            il.Emit(OpCodes.Leave, successLabel);
+                            break;
+
+                        case IrAwait { HasResult: var hasResult, AwaitId: var awaitId }:
+                            EmitAwaitSuspension(il, hasResult, awaitId, smType, stateField, builderField,
+                                builderType, awaiterFields, resumeLabels[awaitId], stateLocal,
+                                scratchLocal, awaiterTempVoid, voidTaskAwaiterType,
+                                returnLabel);
+                            break;
+
+                        case IrBranch { TargetLabel: var target }:
+                            if (blockLabels.TryGetValue(target, out var brTarget))
+                                il.Emit(OpCodes.Br, brTarget);
+                            break;
+
+                        case IrBranchIf { TrueLabel: var trueLabel, FalseLabel: var falseLabel }:
+                            if (blockLabels.TryGetValue(trueLabel, out var tl))
+                                il.Emit(OpCodes.Brtrue, tl);
+                            if (blockLabels.TryGetValue(falseLabel, out var fl))
+                                il.Emit(OpCodes.Br, fl);
+                            break;
+
+                        default:
+                            // For all other instructions, emit them normally using a dummy locals array
+                            // (since all locals are hoisted to fields, we pass an empty array)
+                            EmitInstruction(il, instr, [], blockLabels, func, null);
+                            break;
+                    }
+                }
+            }
+
+            // If we fall through without a return, leave to success
+            il.Emit(OpCodes.Leave, successLabel);
+
+            // ── Catch block ──
+            il.BeginCatchBlock(typeof(Exception));
+            {
+                var exLocal = il.DeclareLocal(typeof(Exception));
+                il.Emit(OpCodes.Stloc, exLocal);
+
+                // this.<>1__state = -2
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldc_I4, -2);
+                il.Emit(OpCodes.Stfld, stateField);
+
+                // this.<>t__builder.SetException(ex)
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldflda, builderField);
+                il.Emit(OpCodes.Ldloc, exLocal);
+                il.Emit(OpCodes.Call, builderType.GetMethod("SetException", [typeof(Exception)])!);
+
+                // Leave to returnLabel (skip SetResult)
+                il.Emit(OpCodes.Leave, returnLabel);
+            }
+            il.EndExceptionBlock();
+
+            // ── Success epilogue: set state = -2, set result ──
+            il.MarkLabel(successLabel);
+
+            // this.<>1__state = -2
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldc_I4, -2);
+            il.Emit(OpCodes.Stfld, stateField);
+
+            // this.<>t__builder.SetResult(result) or SetResult()
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldflda, builderField);
+            if (isVoidAsync)
+            {
+                il.Emit(OpCodes.Call, builderType.GetMethod("SetResult", Type.EmptyTypes)!);
+            }
+            else
+            {
+                il.Emit(OpCodes.Ldloc, resultLocal!);
+                il.Emit(OpCodes.Call, builderType.GetMethod("SetResult", [typeof(object)])!);
+            }
+
+            // ── Final return ──
+            il.MarkLabel(returnLabel);
+            il.Emit(OpCodes.Ret);
+
+            // Override IAsyncStateMachine.MoveNext
+            smType.DefineMethodOverride(moveNextMethod,
+                typeof(System.Runtime.CompilerServices.IAsyncStateMachine).GetMethod("MoveNext")!);
+        }
+
+        // ── D. Emit SetStateMachine (required by interface, can be empty) ──
+        {
+            var setSmMethod = smType.DefineMethod("SetStateMachine",
+                MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.Final | MethodAttributes.NewSlot,
+                typeof(void), [typeof(System.Runtime.CompilerServices.IAsyncStateMachine)]);
+            setSmMethod.DefineParameter(1, ParameterAttributes.None, "stateMachine");
+            var il = setSmMethod.GetILGenerator();
+            il.Emit(OpCodes.Ret);
+
+            smType.DefineMethodOverride(setSmMethod,
+                typeof(System.Runtime.CompilerServices.IAsyncStateMachine).GetMethod("SetStateMachine")!);
+        }
+
+        smType.CreateType();
+    }
+
+    /// <summary>
+    /// Emits the await suspension/resumption sequence for a single await point.
+    /// Pattern:
+    ///   1. GetAwaiter() → store in temp
+    ///   2. IsCompleted? → brtrue to getResultLabel
+    ///   3. (not completed) → save state, save awaiter to field, schedule continuation,
+    ///      leave to returnLabel (outside try block, just ret)
+    ///   4. resumeLabel: → restore awaiter from field, clear field, reset state to -1
+    ///   5. getResultLabel: → call GetResult() on temp (result on stack if hasResult)
+    /// </summary>
+    private void EmitAwaitSuspension(ILGenerator il, bool hasResult, int awaitId,
+        TypeBuilder smType, FieldBuilder stateField, FieldBuilder builderField,
+        Type builderType, FieldBuilder[] awaiterFields, Label resumeLabel, LocalBuilder stateLocal,
+        LocalBuilder scratchLocal, LocalBuilder awaiterTempVoid,
+        Type voidTaskAwaiterType,
+        Label returnLabel)
+    {
+        var getResultLabel = il.DefineLabel();
+        var awaiterField = awaiterFields[awaitId];
+
+        // All await points use TaskAwaiter (void) for the suspension mechanism.
+        // This works because Task<T> inherits from Task, so Task.GetAwaiter() always works.
+        // After resumption, if hasResult=true, we get the result via Task<object>.Result.
+
+        // Save the task to a field so we can retrieve the result after resumption
+        FieldBuilder? taskSaveField = null;
+        if (hasResult)
+        {
+            // We reuse the awaiterField's slot conceptually, but need a separate object field
+            // to save the task for later .Result access. We'll store it in a local for now.
+            // Actually, we need it to survive across suspension — use the state machine's scratch.
+            // Store the task object in the awaiter field (as object) — but field is TaskAwaiter type.
+            // Better: store in a local field. We'll add one dynamically.
+            // For simplicity, store the task reference in the local field for this await point.
+            // We'll use localFields if available, or add a dedicated task-save field.
+            //
+            // Cleanest approach: we already have the task on the stack. Dup it, store to a
+            // dedicated field, then continue with the void awaiter path.
+            taskSaveField = smType.DefineField($"<>__task_{awaitId}", typeof(object), FieldAttributes.Public);
+            il.Emit(OpCodes.Dup);
+            il.Emit(OpCodes.Stloc, scratchLocal);
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldloc, scratchLocal);
+            il.Emit(OpCodes.Stfld, taskSaveField);
+        }
+
+        // Cast to base Task (works for both Task and Task<T>)
+        il.Emit(OpCodes.Castclass, typeof(System.Threading.Tasks.Task));
+        il.Emit(OpCodes.Callvirt, typeof(System.Threading.Tasks.Task)
+            .GetMethod("GetAwaiter", Type.EmptyTypes)!);
+        il.Emit(OpCodes.Stloc, awaiterTempVoid);
+
+        // Check IsCompleted
+        il.Emit(OpCodes.Ldloca, awaiterTempVoid);
+        il.Emit(OpCodes.Call, voidTaskAwaiterType.GetProperty("IsCompleted")!.GetGetMethod()!);
+        il.Emit(OpCodes.Brtrue, getResultLabel);
+
+        // Not completed — suspend
+        il.Emit(OpCodes.Ldarg_0);
+        il.Emit(OpCodes.Ldc_I4, awaitId);
+        il.Emit(OpCodes.Stfld, stateField);
+
+        il.Emit(OpCodes.Ldarg_0);
+        il.Emit(OpCodes.Ldloc, awaiterTempVoid);
+        il.Emit(OpCodes.Stfld, awaiterField);
+
+        il.Emit(OpCodes.Ldarg_0);
+        il.Emit(OpCodes.Ldflda, builderField);
+        il.Emit(OpCodes.Ldarg_0);
+        il.Emit(OpCodes.Ldflda, awaiterField);
+        il.Emit(OpCodes.Ldarg_0);
+        {
+            var awaitOnCompleted = builderType.GetMethod("AwaitUnsafeOnCompleted")!;
+            try
+            {
+                il.Emit(OpCodes.Call, awaitOnCompleted.MakeGenericMethod(voidTaskAwaiterType, smType));
+            }
+            catch
+            {
+                il.Emit(OpCodes.Call, awaitOnCompleted.MakeGenericMethod(voidTaskAwaiterType, typeof(System.Runtime.CompilerServices.IAsyncStateMachine)));
+            }
+        }
+
+        // Leave the try block → ret (skip SetResult)
+        il.Emit(OpCodes.Leave, returnLabel);
+
+        // Resume_N: (jumped to from state dispatch switch at the top of MoveNext)
+        il.MarkLabel(resumeLabel);
+
+        // Restore awaiter from field
+        il.Emit(OpCodes.Ldarg_0);
+        il.Emit(OpCodes.Ldfld, awaiterField);
+        il.Emit(OpCodes.Stloc, awaiterTempVoid);
+
+        // Clear the awaiter field
+        il.Emit(OpCodes.Ldarg_0);
+        il.Emit(OpCodes.Ldflda, awaiterField);
+        il.Emit(OpCodes.Initobj, voidTaskAwaiterType);
+
+        // Reset state to -1 (running)
+        il.Emit(OpCodes.Ldarg_0);
+        il.Emit(OpCodes.Ldc_I4_M1);
+        il.Emit(OpCodes.Stfld, stateField);
+
+        // getResultLabel: both fast and slow paths converge here
+        il.MarkLabel(getResultLabel);
+
+        // Call GetResult (validates no exception was thrown)
+        il.Emit(OpCodes.Ldloca, awaiterTempVoid);
+        il.Emit(OpCodes.Call, voidTaskAwaiterType.GetMethod("GetResult")!);
+
+        // If hasResult, retrieve the result from the saved Task<object>
+        if (hasResult && taskSaveField is not null)
+        {
+            // Load the saved task, try to get Result from Task<object>
+            // If it's a plain Task (not Task<T>), push null
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldfld, taskSaveField);
+            var isTaskOfObj = il.DefineLabel();
+            var resultDone = il.DefineLabel();
+            il.Emit(OpCodes.Isinst, typeof(System.Threading.Tasks.Task<object>));
+            il.Emit(OpCodes.Dup);
+            il.Emit(OpCodes.Brtrue, isTaskOfObj);
+            // Plain Task — push null
+            il.Emit(OpCodes.Pop);
+            il.Emit(OpCodes.Ldnull);
+            il.Emit(OpCodes.Br, resultDone);
+            il.MarkLabel(isTaskOfObj);
+            // Task<object> — get Result
+            il.Emit(OpCodes.Callvirt, typeof(System.Threading.Tasks.Task<object>)
+                .GetProperty("Result")!.GetGetMethod()!);
+            il.MarkLabel(resultDone);
         }
     }
 

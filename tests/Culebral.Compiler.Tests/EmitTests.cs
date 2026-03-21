@@ -3293,6 +3293,23 @@ public class EmitTests : IDisposable
         Assert.Equal("effect\ndone", output);
     }
 
+    [Fact]
+    public void Async_TaskDelay_TrueStateMachine()
+    {
+        var output = CompileAndRun("""
+            from System.Threading.Tasks import Task
+
+            async def delayed_value() -> str:
+                await Task.Delay(10)
+                return "done"
+
+            async def main():
+                result = await delayed_value()
+                print(result)
+            """);
+        Assert.Equal("done", output);
+    }
+
     // ─── Null Safety / Flow Typing ───
 
     [Fact]

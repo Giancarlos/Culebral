@@ -230,8 +230,8 @@ public sealed record IrTupleElement(int Index, SourceSpan Span) : IrInstruction(
 // Generator yield — adds the value on the stack to the generator list
 public sealed record IrYield(SourceSpan Span) : IrInstruction(Span);
 
-// Async await — synchronously gets the result of a Task via GetAwaiter().GetResult()
-public sealed record IrAwait(bool HasResult, SourceSpan Span) : IrInstruction(Span);
+// Async await — suspends via IAsyncStateMachine when await points exist, else synchronous fallback
+public sealed record IrAwait(bool HasResult, int AwaitId, SourceSpan Span) : IrInstruction(Span);
 
 // Collection / string operators
 /// <summary>List concatenation: stack [left_list, right_list] → new list with all elements.</summary>

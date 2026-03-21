@@ -19,6 +19,7 @@ public sealed class IrLowering
     private IrBasicBlock? _currentBlock;
     private int _blockCounter;
     private int _localCounter;
+    private int _awaitCounter;
 
     // Loop context for break/continue
     private readonly Stack<(string BreakLabel, string ContinueLabel)> _loopStack = new();
@@ -775,6 +776,7 @@ public sealed class IrLowering
         _currentFunction = irFunc;
         _currentBlock = entryBlock;
         _localCounter = 0;
+        _awaitCounter = 0;
 
         LowerBlock(func.Body);
 
@@ -848,6 +850,7 @@ public sealed class IrLowering
         _currentBlock = entryBlock;
         _currentDeclaringType = declaringType;
         _localCounter = 0;
+        _awaitCounter = 0;
 
         LowerBlock(method.Body);
 
@@ -1848,7 +1851,7 @@ public sealed class IrLowering
                 // Determine if the await produces a value (Task<T> vs Task)
                 var awaitType = _typeChecker.ResolvedTypes.TryGetValue(awaitExpr.Operand, out var at) ? at : PrimitiveType.Object;
                 bool awaitHasResult = awaitType != PrimitiveType.Void;
-                _currentBlock.Emit(new IrAwait(awaitHasResult, awaitExpr.Span));
+                _currentBlock.Emit(new IrAwait(awaitHasResult, _awaitCounter++, awaitExpr.Span));
                 // IrAwait leaves an object on the stack (from Task<object>.Result);
                 // unbox to the expected value type if needed
                 if (awaitHasResult && awaitType is PrimitiveType pt && pt.ClrBackingType.IsValueType)
