@@ -29,6 +29,23 @@ public sealed class CilEmitter
     private readonly HashSet<string> _valueTypeNames = new();
     private MethodBuilder? _entryPointMethod;
 
+    // PDB debug info: maps method metadata tokens to their sequence points
+    private readonly List<MethodDebugInfo> _methodDebugInfos = [];
+
+    private sealed class MethodDebugInfo
+    {
+        public required MethodBuilder Method { get; init; }
+        public required string SourceFile { get; init; }
+        public required List<SequencePointInfo> SequencePoints { get; init; }
+    }
+
+    private readonly record struct SequencePointInfo(int IlOffset, int StartLine, int StartColumn, int EndLine, int EndColumn);
+
+    // Transient state for the method currently being emitted
+    private List<SequencePointInfo>? _currentSequencePoints;
+    private int _currentDebugLine;
+    private string _sourcePath = "";
+
     public CilEmitter(DiagnosticBag diagnostics, string outputPath)
     {
         _diagnostics = diagnostics;
@@ -39,6 +56,7 @@ public sealed class CilEmitter
     {
         try
         {
+            _sourcePath = Path.GetFullPath(module.SourcePath);
             InitializeAssembly(module.Name);
             EmitTypes(module);
             EmitFunctions(module);
@@ -361,7 +379,7 @@ public sealed class CilEmitter
             return;
 
         var il = mb.GetILGenerator();
-        EmitFunctionBody(il, method);
+        EmitFunctionBodyWithDebugInfo(il, method, mb, _sourcePath);
     }
 
     /// <summary>
@@ -386,7 +404,7 @@ public sealed class CilEmitter
         if (typeDef.Kind == IrTypeKind.Interface) return;
 
         var il = mb.GetILGenerator();
-        EmitFunctionBody(il, method);
+        EmitFunctionBodyWithDebugInfo(il, method, mb, _sourcePath);
     }
 
     /// <summary>
@@ -407,7 +425,7 @@ public sealed class CilEmitter
         if (typeDef.Kind != IrTypeKind.Interface)
         {
             var instanceIl = instanceMb.GetILGenerator();
-            EmitFunctionBody(instanceIl, method);
+            EmitFunctionBodyWithDebugInfo(instanceIl, method, instanceMb, _sourcePath);
         }
 
         // Now emit the static operator method: op_XXX(T, T) → calls left.__dunder__(right)
@@ -493,7 +511,7 @@ public sealed class CilEmitter
         if (typeDef.Kind != IrTypeKind.Interface)
         {
             var il = instanceMb.GetILGenerator();
-            EmitFunctionBody(il, method);
+            EmitFunctionBodyWithDebugInfo(il, method, instanceMb, _sourcePath);
         }
 
         // Emit the .NET-friendly alias that delegates to the dunder method
@@ -533,7 +551,7 @@ public sealed class CilEmitter
                 getterAttrs, clrType, Type.EmptyTypes);
             _methodBuilders[$"{typeDef.Name}.get_{prop.Name}"] = getterMb;
             var il = getterMb.GetILGenerator();
-            EmitFunctionBody(il, prop.Getter);
+            EmitFunctionBodyWithDebugInfo(il, prop.Getter, getterMb, _sourcePath);
             pb.SetGetMethod(getterMb);
         }
 
@@ -551,7 +569,7 @@ public sealed class CilEmitter
             setterMb.DefineParameter(1, ParameterAttributes.None, "value");
             _methodBuilders[$"{typeDef.Name}.set_{prop.Name}"] = setterMb;
             var il = setterMb.GetILGenerator();
-            EmitFunctionBody(il, prop.Setter);
+            EmitFunctionBodyWithDebugInfo(il, prop.Setter, setterMb, _sourcePath);
             pb.SetSetMethod(setterMb);
         }
     }
@@ -631,7 +649,7 @@ public sealed class CilEmitter
         foreach (var (func, mb) in functionsToEmit)
         {
             var il = mb.GetILGenerator();
-            EmitFunctionBody(il, func);
+            EmitFunctionBodyWithDebugInfo(il, func, mb, _sourcePath);
         }
 
         programType.CreateType();
@@ -739,16 +757,66 @@ public sealed class CilEmitter
             labels[block.Label] = il.DefineLabel();
         }
 
-        // Emit basic blocks
+        // Emit basic blocks, tracking sequence points for PDB debug info
         foreach (var block in func.Body)
         {
             il.MarkLabel(labels[block.Label]);
 
             foreach (var instr in block.Instructions)
             {
+                TrackSequencePoint(il, instr);
                 EmitInstruction(il, instr, locals, labels, func, generatorListLocal);
             }
         }
+    }
+
+    /// <summary>
+    /// Records a sequence point when the source line changes, mapping IL offset to source location.
+    /// </summary>
+    private void TrackSequencePoint(ILGenerator il, IrInstruction instr)
+    {
+        if (_currentSequencePoints is null)
+            return;
+
+        var span = instr.Span;
+        if (span == SourceSpan.None || span.Start.Line <= 0)
+            return;
+
+        // Only record a new sequence point when the line changes
+        if (span.Start.Line == _currentDebugLine)
+            return;
+
+        _currentDebugLine = span.Start.Line;
+        var endLine = span.End.Line > 0 ? span.End.Line : span.Start.Line;
+        var startCol = span.Start.Column > 0 ? span.Start.Column : 1;
+        var endCol = span.End.Column > 0 ? span.End.Column : startCol + 1;
+
+        _currentSequencePoints.Add(new SequencePointInfo(
+            il.ILOffset, span.Start.Line, startCol, endLine, endCol));
+    }
+
+    /// <summary>
+    /// Wraps EmitFunctionBody to collect debug sequence points and register them for PDB generation.
+    /// </summary>
+    private void EmitFunctionBodyWithDebugInfo(ILGenerator il, IrFunction func, MethodBuilder method, string sourceFile)
+    {
+        _currentSequencePoints = [];
+        _currentDebugLine = 0;
+
+        EmitFunctionBody(il, func);
+
+        if (_currentSequencePoints.Count > 0)
+        {
+            _methodDebugInfos.Add(new MethodDebugInfo
+            {
+                Method = method,
+                SourceFile = sourceFile,
+                SequencePoints = _currentSequencePoints,
+            });
+        }
+
+        _currentSequencePoints = null;
+        _currentDebugLine = 0;
     }
 
     private void EmitInstruction(ILGenerator il, IrInstruction instr,
@@ -3820,12 +3888,37 @@ public sealed class CilEmitter
                 _entryPointMethod.MetadataToken)
             : default;
 
+        // Build portable PDB debug information
+        var pdbBuilder = BuildPortablePdb(metadataBuilder);
+        BlobContentId pdbContentId = default;
+        DebugDirectoryBuilder? debugDirBuilder = null;
+
+        if (pdbBuilder is not null)
+        {
+            // Serialize the PDB first to get its content ID
+            var pdbBlob = new BlobBuilder();
+            pdbContentId = pdbBuilder.Serialize(pdbBlob);
+
+            // Write the PDB file
+            var pdbPath = Path.ChangeExtension(_outputPath, ".pdb");
+            using var pdbFs = new FileStream(pdbPath, FileMode.Create, FileAccess.Write);
+            pdbBlob.WriteContentTo(pdbFs);
+
+            // Create a debug directory entry that links the PE to the PDB
+            debugDirBuilder = new DebugDirectoryBuilder();
+            debugDirBuilder.AddCodeViewEntry(
+                pdbPath: Path.GetFileName(Path.ChangeExtension(_outputPath, ".pdb")),
+                pdbContentId: pdbContentId,
+                portablePdbVersion: 0x0100);
+        }
+
         var peBuilder = new ManagedPEBuilder(
             header: peHeaderBuilder,
             metadataRootBuilder: new MetadataRootBuilder(metadataBuilder),
             ilStream: ilStream,
             mappedFieldData: fieldData,
-            entryPoint: entryPointHandle);
+            entryPoint: entryPointHandle,
+            debugDirectoryBuilder: debugDirBuilder);
 
         var blobBuilder = new BlobBuilder();
         peBuilder.Serialize(blobBuilder);
@@ -3833,6 +3926,128 @@ public sealed class CilEmitter
         using var fs = new FileStream(_outputPath, FileMode.Create, FileAccess.Write);
         blobBuilder.WriteContentTo(fs);
     }
+
+    /// <summary>
+    /// Builds a portable PDB with MethodDebugInformation rows aligned 1:1 with MethodDef rows.
+    /// Returns null if no debug info was collected.
+    /// </summary>
+    private PortablePdbBuilder? BuildPortablePdb(MetadataBuilder peMetadata)
+    {
+        var pdbMetadata = new MetadataBuilder();
+
+        // Cache document handles per source file path
+        var documentHandles = new Dictionary<string, DocumentHandle>();
+
+        // Build a lookup from method definition row number to debug info
+        // MetadataToken is valid here because GenerateMetadata() has been called
+        var debugLookup = new Dictionary<int, MethodDebugInfo>();
+        foreach (var mdi in _methodDebugInfos)
+        {
+            var token = mdi.Method.MetadataToken;
+            if (token == 0) continue;
+            var rowNumber = MetadataTokens.GetRowNumber(MetadataTokens.EntityHandle(token));
+            debugLookup[rowNumber] = mdi;
+        }
+
+        // Count the total number of MethodDef rows in the PE metadata
+        var methodDefCount = peMetadata.GetRowCount(TableIndex.MethodDef);
+
+        for (int row = 1; row <= methodDefCount; row++)
+        {
+            if (debugLookup.TryGetValue(row, out var methodDebug) && methodDebug.SequencePoints.Count > 0)
+            {
+                // Get or create the document handle for this source file
+                if (!documentHandles.TryGetValue(methodDebug.SourceFile, out var docHandle))
+                {
+                    docHandle = pdbMetadata.AddDocument(
+                        name: pdbMetadata.GetOrAddDocumentName(methodDebug.SourceFile),
+                        hashAlgorithm: default,
+                        hash: default,
+                        language: pdbMetadata.GetOrAddGuid(new Guid("3f5162f8-07c6-11d3-9053-00c04fa302a1")));
+                    documentHandles[methodDebug.SourceFile] = docHandle;
+                }
+
+                var spBuilder = new BlobBuilder();
+                EncodeSequencePoints(spBuilder, methodDebug.SequencePoints, docHandle);
+
+                pdbMetadata.AddMethodDebugInformation(docHandle, pdbMetadata.GetOrAddBlob(spBuilder));
+            }
+            else
+            {
+                // Empty debug info for methods without source mapping
+                pdbMetadata.AddMethodDebugInformation(default, default);
+            }
+        }
+
+        if (documentHandles.Count == 0)
+            return null;
+
+        var pdbIdBlob = new BlobBuilder();
+        // PDB ID is 20 bytes: 16 byte GUID + 4 byte stamp
+        var pdbId = new byte[20];
+        Random.Shared.NextBytes(pdbId);
+        pdbIdBlob.WriteBytes(pdbId);
+
+        return new PortablePdbBuilder(pdbMetadata, peMetadata.GetRowCounts(), entryPoint: default, idProvider: _ => new BlobContentId(pdbId));
+    }
+
+    /// <summary>
+    /// Encodes sequence points into a blob per the portable PDB spec.
+    /// </summary>
+    private static void EncodeSequencePoints(BlobBuilder builder, List<SequencePointInfo> points, DocumentHandle document)
+    {
+        // Portable PDB sequence points encoding:
+        // Header: LocalSignature (token, compressed uint — we use 0 for standalone sig)
+        // If document is initial: nothing (document is in MethodDebugInformation row)
+        // Then for each sequence point:
+        //   First record: ILOffset (compressed uint), DeltaLines (compressed uint), DeltaColumns (compressed int/uint)
+        //   Subsequent: DeltaILOffset (compressed uint), DeltaLines, DeltaColumns, DeltaStartLine (compressed signed), DeltaStartColumn (compressed signed)
+
+        // LocalSignature row id (0 = no local signature)
+        builder.WriteCompressedInteger(0);
+
+        for (int i = 0; i < points.Count; i++)
+        {
+            var pt = points[i];
+
+            if (i == 0)
+            {
+                // First sequence point: absolute IL offset
+                builder.WriteCompressedInteger(pt.IlOffset);
+            }
+            else
+            {
+                // Delta IL offset (must be > 0 for non-hidden points; clamp to 1 if 0)
+                var deltaIl = pt.IlOffset - points[i - 1].IlOffset;
+                if (deltaIl <= 0) deltaIl = 0;
+                builder.WriteCompressedInteger(deltaIl);
+            }
+
+            var deltaLines = pt.EndLine - pt.StartLine;
+            var deltaColumns = pt.EndColumn - pt.StartColumn;
+
+            // Encode deltaLines and deltaColumns
+            builder.WriteCompressedInteger(deltaLines);
+            if (deltaLines == 0)
+                builder.WriteCompressedInteger(deltaColumns);
+            else
+                builder.WriteCompressedSignedInteger(deltaColumns);
+
+            if (i == 0)
+            {
+                // First record: absolute start line and column
+                builder.WriteCompressedInteger(pt.StartLine);
+                builder.WriteCompressedInteger(pt.StartColumn);
+            }
+            else
+            {
+                // Subsequent records: signed delta from previous
+                builder.WriteCompressedSignedInteger(pt.StartLine - points[i - 1].StartLine);
+                builder.WriteCompressedSignedInteger(pt.StartColumn - points[i - 1].StartColumn);
+            }
+        }
+    }
+
 
     private void GenerateRuntimeConfig(string assemblyName)
     {

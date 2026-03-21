@@ -153,4 +153,92 @@ public class ScriptingTests : IDisposable
         _engine.RemoveFunction("double");
         // No exception means it worked — function registration is stored for future injection
     }
+
+    // ─── Global Variable Injection Tests ───
+
+    [Fact]
+    public void Execute_WithGlobals_InjectsVariables()
+    {
+        _engine.SetGlobal("name", "Alice");
+        _engine.SetGlobal("age", 30);
+        var output = _engine.Execute("""
+            def main():
+                print(f"Hello, {name}! Age: {age}")
+            """);
+        Assert.Equal("Hello, Alice! Age: 30", output.Trim());
+    }
+
+    [Fact]
+    public void Eval_WithGlobals_UsesInjectedValues()
+    {
+        _engine.SetGlobal("x", 10);
+        _engine.SetGlobal("y", 20);
+        var result = _engine.Eval<int>("x + y");
+        Assert.Equal(30, result);
+    }
+
+    [Fact]
+    public void Execute_WithStringGlobal_EscapesCorrectly()
+    {
+        _engine.SetGlobal("msg", "hello \"world\"");
+        var output = _engine.Execute("""
+            def main():
+                print(msg)
+            """);
+        Assert.Equal("hello \"world\"", output.Trim());
+    }
+
+    [Fact]
+    public void Execute_WithNoneGlobal()
+    {
+        _engine.SetGlobal("value", null);
+        var output = _engine.Execute("""
+            def main():
+                if value is None:
+                    print("is none")
+            """);
+        Assert.Equal("is none", output.Trim());
+    }
+
+    [Fact]
+    public void Execute_WithBoolGlobal()
+    {
+        _engine.SetGlobal("flag", true);
+        var output = _engine.Execute("""
+            def main():
+                if flag:
+                    print("truthy")
+            """);
+        Assert.Equal("truthy", output.Trim());
+    }
+
+    [Fact]
+    public void Execute_WithIntGlobal()
+    {
+        _engine.SetGlobal("count", 42);
+        var output = _engine.Execute("""
+            def main():
+                print(count)
+            """);
+        Assert.Equal("42", output.Trim());
+    }
+
+    [Fact]
+    public void Execute_WithFloatGlobal()
+    {
+        _engine.SetGlobal("pi", 3.14);
+        var output = _engine.Execute("""
+            def main():
+                print(pi)
+            """);
+        Assert.Equal("3.14", output.Trim());
+    }
+
+    [Fact]
+    public void Execute_NoGlobals_PassthroughUnchanged()
+    {
+        // With no globals set, Execute should work exactly as before
+        var output = _engine.Execute("def main():\n    print(\"plain\")");
+        Assert.Equal("plain", output.Trim());
+    }
 }

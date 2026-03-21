@@ -3376,4 +3376,64 @@ public class EmitTests : IDisposable
             """);
         Assert.Equal("True", output);
     }
+
+    // ─── PDB Debug Information Tests ───
+
+    [Fact]
+    public void Compile_GeneratesPdbFile()
+    {
+        var skvPath = Path.Combine(_tempDir, "test.leb");
+        var dllPath = Path.Combine(_tempDir, "test.dll");
+        var pdbPath = Path.Combine(_tempDir, "test.pdb");
+        File.WriteAllText(skvPath, """
+            def main():
+                print("hello debug")
+            """);
+
+        var result = Program.Compile(skvPath, dllPath);
+        Assert.True(result.Success, "Compilation failed:\n" + result.Diagnostics.FormatAll());
+        Assert.True(File.Exists(dllPath), "Output assembly was not created");
+        Assert.True(File.Exists(pdbPath), "PDB debug file was not created");
+
+        var pdbSize = new FileInfo(pdbPath).Length;
+        Assert.True(pdbSize > 0, "PDB file is empty");
+    }
+
+    [Fact]
+    public void Compile_PdbFileCreatedForMultiFunctionProgram()
+    {
+        var skvPath = Path.Combine(_tempDir, "test.leb");
+        var dllPath = Path.Combine(_tempDir, "test.dll");
+        var pdbPath = Path.Combine(_tempDir, "test.pdb");
+        File.WriteAllText(skvPath, """
+            def greet(name: str) -> str:
+                return "Hello, " + name
+
+            def main():
+                msg = greet("world")
+                print(msg)
+            """);
+
+        var result = Program.Compile(skvPath, dllPath);
+        Assert.True(result.Success, "Compilation failed:\n" + result.Diagnostics.FormatAll());
+        Assert.True(File.Exists(pdbPath), "PDB debug file was not created");
+
+        var pdbSize = new FileInfo(pdbPath).Length;
+        Assert.True(pdbSize > 0, "PDB file is empty");
+
+        // Verify the program still runs correctly with the PDB present
+        var psi = new ProcessStartInfo
+        {
+            FileName = "dotnet",
+            Arguments = dllPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        using var process = Process.Start(psi)!;
+        var output = process.StandardOutput.ReadToEnd().TrimEnd();
+        process.WaitForExit();
+        Assert.Equal(0, process.ExitCode);
+        Assert.Equal("Hello, world", output);
+    }
 }
