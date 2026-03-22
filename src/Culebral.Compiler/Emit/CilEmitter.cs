@@ -114,6 +114,9 @@ public sealed class CilEmitter
 
             _typeBuilders[typeDef.Name] = tb;
 
+            // Apply class-level decorator attributes
+            ApplyDecoratorAttributes(tb, typeDef);
+
             // Note: Generic type parameter constraints are carried in IrTypeDef.TypeParameters
             // and enforced at the type-checker level. We do not call DefineGenericParameters here
             // because the compiler currently uses type erasure (T → object) for user-defined generics.
@@ -282,6 +285,16 @@ public sealed class CilEmitter
         ["__mul__"] = "op_Multiply",
         ["__truediv__"] = "op_Division",
         ["__mod__"] = "op_Modulus",
+        ["__floordiv__"] = "op_Division",  // floor division (custom — no direct .NET op)
+        ["__pow__"] = "op_Exponent",       // custom operator name
+        ["__neg__"] = "op_UnaryNegation",
+        ["__pos__"] = "op_UnaryPlus",
+        ["__invert__"] = "op_OnesComplement",
+        ["__and__"] = "op_BitwiseAnd",
+        ["__or__"] = "op_BitwiseOr",
+        ["__xor__"] = "op_ExclusiveOr",
+        ["__lshift__"] = "op_LeftShift",
+        ["__rshift__"] = "op_RightShift",
     };
 
     /// <summary>
@@ -300,6 +313,33 @@ public sealed class CilEmitter
     private static readonly Dictionary<string, string> DunderToInstanceMethod = new()
     {
         ["__contains__"] = "Contains",
+        ["__setitem__"] = "set_Item",
+        ["__iter__"] = "GetEnumerator",
+        ["__call__"] = "Invoke",
+        ["__bool__"] = "IsTrue",
+        ["__enter__"] = "Enter",
+        ["__exit__"] = "Exit",
+    };
+
+    /// <summary>
+    /// Python string method names → .NET string method names.
+    /// Applied at compile time during method resolution (zero runtime overhead).
+    /// </summary>
+    private static readonly Dictionary<string, string> PythonStringAliases = new()
+    {
+        ["upper"] = "ToUpper",
+        ["lower"] = "ToLower",
+        ["strip"] = "Trim",
+        ["lstrip"] = "TrimStart",
+        ["rstrip"] = "TrimEnd",
+        ["startswith"] = "StartsWith",
+        ["endswith"] = "EndsWith",
+        ["find"] = "IndexOf",
+        ["rfind"] = "LastIndexOf",
+        ["replace"] = "Replace",
+        ["split"] = "Split",
+        ["zfill"] = "PadLeft",
+        ["index"] = "IndexOf",
     };
 
     private void EmitMethod(TypeBuilder tb, IrFunction method, IrTypeDef typeDef)
@@ -441,24 +481,42 @@ public sealed class CilEmitter
             EmitFunctionBodyWithDebugInfo(instanceIl, method, instanceMb, _sourcePath);
         }
 
-        // Now emit the static operator method: op_XXX(T, T) → calls left.__dunder__(right)
+        // Now emit the static operator method
         var opAttrs = MethodAttributes.Public | MethodAttributes.Static |
                       MethodAttributes.SpecialName | MethodAttributes.HideBySig;
 
-        // Operator takes two params of the declaring type, returns the method's return type
-        var opParamTypes = new[] { tb, tb };
+        // Unary operators (__neg__, __pos__, __invert__) take 0 params → static op(T)
+        // Binary operators (__add__, __eq__, etc.) take 1 param → static op(T, T)
+        bool isUnary = method.Parameters.Count == 0;
+        var opParamTypes = isUnary ? new[] { (Type)tb } : new[] { (Type)tb, (Type)tb };
         var opMb = tb.DefineMethod(operatorName, opAttrs, returnClrType, opParamTypes);
-        opMb.DefineParameter(1, ParameterAttributes.None, "left");
-        opMb.DefineParameter(2, ParameterAttributes.None, "right");
+        if (isUnary)
+        {
+            opMb.DefineParameter(1, ParameterAttributes.None, "operand");
+        }
+        else
+        {
+            opMb.DefineParameter(1, ParameterAttributes.None, "left");
+            opMb.DefineParameter(2, ParameterAttributes.None, "right");
+        }
         _methodBuilders[$"{typeDef.Name}.{operatorName}"] = opMb;
 
         if (typeDef.Kind != IrTypeKind.Interface)
         {
             var opIl = opMb.GetILGenerator();
-            // Load left (arg 0), load right (arg 1), call instance method on left
-            opIl.Emit(OpCodes.Ldarg_0); // left
-            opIl.Emit(OpCodes.Ldarg_1); // right
-            opIl.Emit(OpCodes.Call, instanceMb);
+            if (isUnary)
+            {
+                // Load operand (arg 0), call instance method (no args)
+                opIl.Emit(OpCodes.Ldarg_0);
+                opIl.Emit(OpCodes.Call, instanceMb);
+            }
+            else
+            {
+                // Load left (arg 0), load right (arg 1), call instance method on left
+                opIl.Emit(OpCodes.Ldarg_0);
+                opIl.Emit(OpCodes.Ldarg_1);
+                opIl.Emit(OpCodes.Call, instanceMb);
+            }
             opIl.Emit(OpCodes.Ret);
         }
     }
@@ -678,23 +736,40 @@ public sealed class CilEmitter
     /// <summary>
     /// Applies .NET custom attributes to a method from decorator metadata.
     /// If a decorator name resolves to a .NET type inheriting from System.Attribute,
-    /// emits a .custom attribute on the method.
+    /// emits a .custom attribute on the method, including any constructor arguments.
     /// </summary>
+    private void ApplyDecoratorAttributes(TypeBuilder tb, IrTypeDef typeDef)
+    {
+        if (typeDef.Decorators is null || typeDef.Decorators.Count == 0)
+            return;
+        foreach (var decorator in typeDef.Decorators)
+        {
+            if (decorator.Name == "native") continue;
+            var cab = BuildCustomAttribute(decorator);
+            if (cab is not null)
+                tb.SetCustomAttribute(cab);
+        }
+    }
+
     private void ApplyDecoratorAttributes(MethodBuilder mb, IrFunction func)
     {
         if (func.Decorators is null || func.Decorators.Count == 0)
             return;
 
-        foreach (var decoratorName in func.Decorators)
+        foreach (var decorator in func.Decorators)
         {
             // Skip the 'native' decorator — it's handled separately
-            if (decoratorName == "native")
+            if (decorator.Name == "native")
                 continue;
 
             // Try to resolve as a .NET attribute type
-            var attrType = TryResolveAttributeType(decoratorName);
-            if (attrType is not null)
+            var attrType = TryResolveAttributeType(decorator.Name);
+            if (attrType is null)
+                continue;
+
+            if (decorator.Arguments.Count == 0)
             {
+                // Parameterless constructor
                 var ctor = attrType.GetConstructor(Type.EmptyTypes);
                 if (ctor is not null)
                 {
@@ -702,7 +777,67 @@ public sealed class CilEmitter
                     mb.SetCustomAttribute(cab);
                 }
             }
+            else
+            {
+                // Find a constructor matching the argument types
+                var argValues = decorator.Arguments.ToArray();
+                var argTypes = argValues.Select(a => a?.GetType() ?? typeof(object)).ToArray();
+                var ctor = attrType.GetConstructor(argTypes);
+
+                // If exact match fails, try best-effort: find constructor with matching param count
+                if (ctor is null)
+                {
+                    var ctors = attrType.GetConstructors()
+                        .Where(c => c.GetParameters().Length == argValues.Length)
+                        .ToArray();
+                    if (ctors.Length == 1)
+                    {
+                        ctor = ctors[0];
+                        // Coerce arguments to expected parameter types
+                        var parameters = ctor.GetParameters();
+                        for (int i = 0; i < argValues.Length; i++)
+                        {
+                            if (argValues[i] is not null)
+                                argValues[i] = Convert.ChangeType(argValues[i], parameters[i].ParameterType);
+                        }
+                    }
+                }
+
+                if (ctor is not null)
+                {
+                    var cab = new CustomAttributeBuilder(ctor, argValues!);
+                    mb.SetCustomAttribute(cab);
+                }
+            }
         }
+    }
+
+    private CustomAttributeBuilder? BuildCustomAttribute(IrDecorator decorator)
+    {
+        var attrType = TryResolveAttributeType(decorator.Name);
+        if (attrType is null) return null;
+        if (decorator.Arguments.Count == 0)
+        {
+            var ctor = attrType.GetConstructor(Type.EmptyTypes);
+            return ctor is not null ? new CustomAttributeBuilder(ctor, []) : null;
+        }
+        var argValues = decorator.Arguments.ToArray();
+        var argTypes = argValues.Select(a => a?.GetType() ?? typeof(object)).ToArray();
+        var ctorMatch = attrType.GetConstructor(argTypes);
+        if (ctorMatch is null)
+        {
+            var ctors = attrType.GetConstructors()
+                .Where(c => c.GetParameters().Length == argValues.Length).ToArray();
+            if (ctors.Length == 1)
+            {
+                ctorMatch = ctors[0];
+                var parameters = ctorMatch.GetParameters();
+                for (int ci = 0; ci < argValues.Length; ci++)
+                    if (argValues[ci] is not null)
+                        argValues[ci] = Convert.ChangeType(argValues[ci], parameters[ci].ParameterType);
+            }
+        }
+        return ctorMatch is not null ? new CustomAttributeBuilder(ctorMatch, argValues!) : null;
     }
 
     /// <summary>
@@ -2513,17 +2648,31 @@ public sealed class CilEmitter
                 }
                 else
                 {
+                    // Value types need boxing for Convert.ToInt32(object)
+                    var intStackType = InferStackTopType(callBuiltin, func);
+                    if (intStackType.IsValueType)
+                        il.Emit(OpCodes.Box, intStackType);
                     var convertToInt = typeof(Convert).GetMethod("ToInt32", [typeof(object)])!;
                     il.Emit(OpCodes.Call, convertToInt);
                 }
                 break;
 
             case "float":
+            {
+                // Value types need boxing for Convert.ToDouble(object)
+                var floatStackType = InferStackTopType(callBuiltin, func);
+                if (floatStackType.IsValueType)
+                    il.Emit(OpCodes.Box, floatStackType);
                 var convertToDouble = typeof(Convert).GetMethod("ToDouble", [typeof(object)])!;
                 il.Emit(OpCodes.Call, convertToDouble);
                 break;
+            }
 
             case "str":
+                // Value types need boxing before calling virtual ToString()
+                var strStackType = InferStackTopType(callBuiltin, func);
+                if (strStackType.IsValueType)
+                    il.Emit(OpCodes.Box, strStackType);
                 var objToString = typeof(object).GetMethod("ToString", Type.EmptyTypes)!;
                 il.Emit(OpCodes.Callvirt, objToString);
                 break;
@@ -2867,6 +3016,184 @@ public sealed class CilEmitter
                 break;
             }
 
+            case "hex":
+            {
+                // hex(n) → "0x" + n.ToString("x")
+                var hexLocal = il.DeclareLocal(typeof(int));
+                il.Emit(OpCodes.Stloc, hexLocal);
+                il.Emit(OpCodes.Ldstr, "0x");
+                il.Emit(OpCodes.Ldloca, hexLocal);
+                il.Emit(OpCodes.Ldstr, "x");
+                il.Emit(OpCodes.Call, typeof(int).GetMethod("ToString", [typeof(string)])!);
+                il.Emit(OpCodes.Call, typeof(string).GetMethod("Concat", [typeof(string), typeof(string)])!);
+                break;
+            }
+
+            case "bin":
+            {
+                // bin(n) → "0b" + Convert.ToString(n, 2)
+                il.Emit(OpCodes.Ldc_I4_2);
+                il.Emit(OpCodes.Call, typeof(Convert).GetMethod("ToString", [typeof(int), typeof(int)])!);
+                var binStr = il.DeclareLocal(typeof(string));
+                il.Emit(OpCodes.Stloc, binStr);
+                il.Emit(OpCodes.Ldstr, "0b");
+                il.Emit(OpCodes.Ldloc, binStr);
+                il.Emit(OpCodes.Call, typeof(string).GetMethod("Concat", [typeof(string), typeof(string)])!);
+                break;
+            }
+
+            case "oct":
+            {
+                // oct(n) → "0o" + Convert.ToString(n, 8)
+                il.Emit(OpCodes.Ldc_I4_8);
+                il.Emit(OpCodes.Call, typeof(Convert).GetMethod("ToString", [typeof(int), typeof(int)])!);
+                var octStr = il.DeclareLocal(typeof(string));
+                il.Emit(OpCodes.Stloc, octStr);
+                il.Emit(OpCodes.Ldstr, "0o");
+                il.Emit(OpCodes.Ldloc, octStr);
+                il.Emit(OpCodes.Call, typeof(string).GetMethod("Concat", [typeof(string), typeof(string)])!);
+                break;
+            }
+
+            case "divmod":
+            {
+                // divmod(a, b) → (a / b, a % b) as object[]
+                var divB = il.DeclareLocal(typeof(int));
+                var divA = il.DeclareLocal(typeof(int));
+                il.Emit(OpCodes.Stloc, divB);
+                il.Emit(OpCodes.Stloc, divA);
+                // Create object[2] tuple
+                il.Emit(OpCodes.Ldc_I4_2);
+                il.Emit(OpCodes.Newarr, typeof(object));
+                // [0] = a / b
+                il.Emit(OpCodes.Dup);
+                il.Emit(OpCodes.Ldc_I4_0);
+                il.Emit(OpCodes.Ldloc, divA);
+                il.Emit(OpCodes.Ldloc, divB);
+                il.Emit(OpCodes.Div);
+                il.Emit(OpCodes.Box, typeof(int));
+                il.Emit(OpCodes.Stelem_Ref);
+                // [1] = a % b
+                il.Emit(OpCodes.Dup);
+                il.Emit(OpCodes.Ldc_I4_1);
+                il.Emit(OpCodes.Ldloc, divA);
+                il.Emit(OpCodes.Ldloc, divB);
+                il.Emit(OpCodes.Rem);
+                il.Emit(OpCodes.Box, typeof(int));
+                il.Emit(OpCodes.Stelem_Ref);
+                break;
+            }
+
+            case "pow":
+            {
+                var mathPow = typeof(Math).GetMethod("Pow", [typeof(double), typeof(double)])!;
+                if (argc == 3)
+                {
+                    // pow(base, exp, mod) → (int)(Math.Pow(base, exp)) % mod
+                    // Stack: [base(int), exp(int), mod(int)]
+                    var powMod = il.DeclareLocal(typeof(int));
+                    var powExp = il.DeclareLocal(typeof(int));
+                    il.Emit(OpCodes.Stloc, powMod);   // save mod
+                    il.Emit(OpCodes.Stloc, powExp);    // save exp
+                    il.Emit(OpCodes.Conv_R8);           // convert base to double
+                    il.Emit(OpCodes.Ldloc, powExp);
+                    il.Emit(OpCodes.Conv_R8);           // convert exp to double
+                    il.Emit(OpCodes.Call, mathPow);
+                    il.Emit(OpCodes.Conv_I4);           // truncate to int
+                    il.Emit(OpCodes.Ldloc, powMod);
+                    il.Emit(OpCodes.Rem);
+                    il.Emit(OpCodes.Box, typeof(int));  // box result for object return
+                }
+                else
+                {
+                    // pow(base, exp) → Math.Pow(base, exp)
+                    // Stack: [base(int), exp(int)]
+                    var powExp2 = il.DeclareLocal(typeof(int));
+                    il.Emit(OpCodes.Stloc, powExp2);   // save exp
+                    il.Emit(OpCodes.Conv_R8);           // convert base to double
+                    il.Emit(OpCodes.Ldloc, powExp2);
+                    il.Emit(OpCodes.Conv_R8);           // convert exp to double
+                    il.Emit(OpCodes.Call, mathPow);
+                    il.Emit(OpCodes.Box, typeof(double)); // box result for object return
+                }
+                break;
+            }
+
+            case "repr":
+            {
+                // repr(x) → for strings, add quotes; for others, ToString()
+                var reprType = InferStackTopType(callBuiltin, func);
+                if (reprType == typeof(string))
+                {
+                    // "'" + s + "'"
+                    var reprStr = il.DeclareLocal(typeof(string));
+                    il.Emit(OpCodes.Stloc, reprStr);
+                    il.Emit(OpCodes.Ldstr, "'");
+                    il.Emit(OpCodes.Ldloc, reprStr);
+                    il.Emit(OpCodes.Call, typeof(string).GetMethod("Concat", [typeof(string), typeof(string)])!);
+                    il.Emit(OpCodes.Ldstr, "'");
+                    il.Emit(OpCodes.Call, typeof(string).GetMethod("Concat", [typeof(string), typeof(string)])!);
+                }
+                else
+                {
+                    if (reprType.IsValueType)
+                        il.Emit(OpCodes.Box, reprType);
+                    il.Emit(OpCodes.Callvirt, typeof(object).GetMethod("ToString", Type.EmptyTypes)!);
+                }
+                break;
+            }
+
+            case "format":
+            {
+                if (argc == 2)
+                {
+                    // format(value, spec) → String.Format("{0:" + spec + "}", value)
+                    var fmtSpec = il.DeclareLocal(typeof(string));
+                    il.Emit(OpCodes.Stloc, fmtSpec);
+                    var fmtVal = il.DeclareLocal(typeof(object));
+                    var fmtValType = InferNthArgType(callBuiltin, func, 0, 2);
+                    if (fmtValType.IsValueType)
+                        il.Emit(OpCodes.Box, fmtValType);
+                    il.Emit(OpCodes.Stloc, fmtVal);
+                    // Build format string: "{0:" + spec + "}"
+                    il.Emit(OpCodes.Ldstr, "{0:");
+                    il.Emit(OpCodes.Ldloc, fmtSpec);
+                    il.Emit(OpCodes.Call, typeof(string).GetMethod("Concat", [typeof(string), typeof(string)])!);
+                    il.Emit(OpCodes.Ldstr, "}");
+                    il.Emit(OpCodes.Call, typeof(string).GetMethod("Concat", [typeof(string), typeof(string)])!);
+                    il.Emit(OpCodes.Ldloc, fmtVal);
+                    il.Emit(OpCodes.Call, typeof(string).GetMethod("Format", [typeof(string), typeof(object)])!);
+                }
+                else
+                {
+                    // format(value) → str(value)
+                    var fmtValType1 = InferStackTopType(callBuiltin, func);
+                    if (fmtValType1.IsValueType)
+                        il.Emit(OpCodes.Box, fmtValType1);
+                    il.Emit(OpCodes.Callvirt, typeof(object).GetMethod("ToString", Type.EmptyTypes)!);
+                }
+                break;
+            }
+
+            case "tuple":
+            {
+                // tuple(iterable) → convert to object[] (our tuple representation)
+                if (argc == 0)
+                {
+                    // tuple() → empty array
+                    il.Emit(OpCodes.Ldc_I4_0);
+                    il.Emit(OpCodes.Newarr, typeof(object));
+                }
+                else
+                {
+                    // tuple(iterable) → materialize to List, then ToArray
+                    il.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+                    EmitListFromEnumerableHelper(il);
+                    il.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("ToArray")!);
+                }
+                break;
+            }
+
             default:
                 // Unknown builtin — emit a nop and warning
                 _diagnostics.Warning("LEB4001", $"Unknown builtin function '{name}'", SourceSpan.None);
@@ -2931,14 +3258,171 @@ public sealed class CilEmitter
             }
         }
 
-        // Try snake_case → PascalCase resolution on common BCL types
-        var pascalName = Semantics.DotNetTypeResolver.SnakeToPascal(name);
+        // ── str.isdigit() / isalpha() / isspace() ──
+        // Emit as: s.Length > 0 && s.ToCharArray().All(charCheck)
+        // Using Enumerable.All<char> with the char method delegate
+        if ((name is "isdigit" or "isalpha" or "isspace") && argc == 0)
+        {
+            var charCheck = name switch
+            {
+                "isdigit" => typeof(char).GetMethod("IsDigit", [typeof(char)])!,
+                "isalpha" => typeof(char).GetMethod("IsLetter", [typeof(char)])!,
+                _ => typeof(char).GetMethod("IsWhiteSpace", [typeof(char)])!,
+            };
+            // Stack: string
+            // Store string, check length > 0, then use bool helper approach
+            var sLocal = il.DeclareLocal(typeof(string));
+            il.Emit(OpCodes.Stloc, sLocal);
+            // Push length > 0
+            il.Emit(OpCodes.Ldloc, sLocal);
+            il.Emit(OpCodes.Callvirt, typeof(string).GetProperty("Length")!.GetGetMethod()!);
+            il.Emit(OpCodes.Ldc_I4_0);
+            il.Emit(OpCodes.Cgt);
+            // Now stack has: bool (length > 0). If false, result is false.
+            // If true, we need to check all characters.
+            // Simplest: negate and short-circuit
+            var resultLocal = il.DeclareLocal(typeof(bool));
+            var endLabel = il.DefineLabel();
+            il.Emit(OpCodes.Dup);
+            il.Emit(OpCodes.Brfalse, endLabel); // if length==0, leave false on stack
+            il.Emit(OpCodes.Pop); // remove the true from Cgt
+
+            // for (i = 0; i < len; i++) if (!check(s[i])) → false
+            var iLocal = il.DeclareLocal(typeof(int));
+            il.Emit(OpCodes.Ldc_I4_0);
+            il.Emit(OpCodes.Stloc, iLocal);
+            var condLabel = il.DefineLabel();
+            var bodyLabel = il.DefineLabel();
+            var incrLabel = il.DefineLabel();
+            il.Emit(OpCodes.Br, condLabel);
+
+            il.MarkLabel(bodyLabel);
+            il.Emit(OpCodes.Ldloc, sLocal);
+            il.Emit(OpCodes.Ldloc, iLocal);
+            il.Emit(OpCodes.Callvirt, typeof(string).GetMethod("get_Chars", [typeof(int)])!);
+            il.Emit(OpCodes.Call, charCheck);
+            il.Emit(OpCodes.Brtrue, incrLabel); // char passed → increment
+            il.Emit(OpCodes.Ldc_I4_0); // char failed → false
+            il.Emit(OpCodes.Br, endLabel);
+
+            il.MarkLabel(incrLabel);
+            il.Emit(OpCodes.Ldloc, iLocal);
+            il.Emit(OpCodes.Ldc_I4_1);
+            il.Emit(OpCodes.Add);
+            il.Emit(OpCodes.Stloc, iLocal);
+
+            il.MarkLabel(condLabel);
+            il.Emit(OpCodes.Ldloc, iLocal);
+            il.Emit(OpCodes.Ldloc, sLocal);
+            il.Emit(OpCodes.Callvirt, typeof(string).GetProperty("Length")!.GetGetMethod()!);
+            il.Emit(OpCodes.Blt, bodyLabel);
+            il.Emit(OpCodes.Ldc_I4_1); // all passed → true
+
+            il.MarkLabel(endLabel);
+            // Stack: int32 (bool). Box for print compatibility.
+            il.Emit(OpCodes.Box, typeof(bool));
+            return;
+        }
+
+        // ── str.count(sub) — count non-overlapping occurrences ──
+        // Formula: (s.Length - s.Replace(sub, "").Length) / sub.Length
+        if (name == "count" && argc == 1)
+        {
+            // Stack: [receiver(object), arg(object)] — cast both to string
+            il.Emit(OpCodes.Castclass, typeof(string));
+            var countSub = il.DeclareLocal(typeof(string));
+            il.Emit(OpCodes.Stloc, countSub);  // pop arg (substring)
+            il.Emit(OpCodes.Castclass, typeof(string));
+            var countStr = il.DeclareLocal(typeof(string));
+            il.Emit(OpCodes.Stloc, countStr);  // pop receiver (string)
+            // s.Length
+            il.Emit(OpCodes.Ldloc, countStr);
+            il.Emit(OpCodes.Callvirt, typeof(string).GetProperty("Length")!.GetGetMethod()!);
+            // s.Replace(sub, "").Length
+            il.Emit(OpCodes.Ldloc, countStr);
+            il.Emit(OpCodes.Ldloc, countSub);
+            il.Emit(OpCodes.Ldstr, "");
+            il.Emit(OpCodes.Callvirt, typeof(string).GetMethod("Replace", [typeof(string), typeof(string)])!);
+            il.Emit(OpCodes.Callvirt, typeof(string).GetProperty("Length")!.GetGetMethod()!);
+            // (s.Length - replaced.Length) / sub.Length
+            il.Emit(OpCodes.Sub);
+            il.Emit(OpCodes.Ldloc, countSub);
+            il.Emit(OpCodes.Callvirt, typeof(string).GetProperty("Length")!.GetGetMethod()!);
+            il.Emit(OpCodes.Div);
+            il.Emit(OpCodes.Box, typeof(int));
+            return;
+        }
+
+        // ── str.join() — receiver/arg swap to string.Join(separator, iterable) ──
+        if (name == "join" && argc == 1)
+        {
+            // Stack: [separator (string), iterable (object)]
+            // Materialize iterable to string[] via helper, then call string.Join(string, string[])
+            var joinIter = il.DeclareLocal(typeof(object));
+            il.Emit(OpCodes.Stloc, joinIter);
+            // separator stays on stack
+            var joinSep = il.DeclareLocal(typeof(string));
+            il.Emit(OpCodes.Stloc, joinSep);
+            // Convert iterable to List<object>, then select ToString on each
+            il.Emit(OpCodes.Ldloc, joinSep);
+            il.Emit(OpCodes.Ldloc, joinIter);
+            il.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+            // Use the String.Join(String, IEnumerable<String>) via LINQ .Cast<object>().Select(o => o.ToString())
+            // Simpler: use String.Join(String, Object[]) — convert list to array first
+            EmitListFromEnumerableHelper(il);  // iterable → List<object>
+            il.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("ToArray")!);
+            // Now stack: [sep (string), object[] array]
+            il.Emit(OpCodes.Call, typeof(string).GetMethod("Join", [typeof(string), typeof(object[])])!);
+            return;
+        }
+
+        // ── dict.get(key) and dict.get(key, default) ──
+        if (name == "get" && argc is 1 or 2)
+        {
+            LocalBuilder? getDefault = null;
+            if (argc == 2)
+            {
+                // Box value types (e.g., int default)
+                if (func is not null && instr is not null)
+                {
+                    var defType = InferStackTopType(instr, func);
+                    if (defType.IsValueType)
+                        il.Emit(OpCodes.Box, defType);
+                }
+                getDefault = il.DeclareLocal(typeof(object));
+                il.Emit(OpCodes.Stloc, getDefault);
+            }
+            var getKey = il.DeclareLocal(typeof(object));
+            il.Emit(OpCodes.Stloc, getKey);
+            il.Emit(OpCodes.Ldloc, getKey);
+            var getOut = il.DeclareLocal(typeof(object));
+            il.Emit(OpCodes.Ldloca, getOut);
+            il.Emit(OpCodes.Callvirt, typeof(Dictionary<object, object>)
+                .GetMethod("TryGetValue")!);
+            var getFound = il.DefineLabel();
+            var getEnd = il.DefineLabel();
+            il.Emit(OpCodes.Brtrue, getFound);
+            if (getDefault is not null)
+                il.Emit(OpCodes.Ldloc, getDefault);
+            else
+                il.Emit(OpCodes.Ldnull);
+            il.Emit(OpCodes.Br, getEnd);
+            il.MarkLabel(getFound);
+            il.Emit(OpCodes.Ldloc, getOut);
+            il.MarkLabel(getEnd);
+            return;
+        }
+
+        // Python string method aliases → .NET method names
+        var resolvedName = PythonStringAliases.TryGetValue(name, out var dotNetName)
+            ? dotNetName
+            : Semantics.DotNetTypeResolver.SnakeToPascal(name);
 
         // Try resolving on object/string — the most common base types for untyped calls
         var typesToTry = new[] { typeof(string), typeof(object) };
         foreach (var type in typesToTry)
         {
-            var method = FindDotNetMethod(type, pascalName, argc, isStatic: false);
+            var method = FindDotNetMethod(type, resolvedName, argc, isStatic: false);
             if (method is not null)
             {
                 il.Emit(OpCodes.Callvirt, method);
@@ -4232,6 +4716,7 @@ public sealed class CilEmitter
     /// <summary>
     /// Infers the receiver type for a virtual call by scanning backward in the IR
     /// to find the IrNewObj that created the collection being called on.
+    /// Traces through local variable loads/stores across basic blocks.
     /// </summary>
     private Type InferReceiverType(IrInstruction target, IrFunction func)
     {
@@ -4241,22 +4726,51 @@ public sealed class CilEmitter
             {
                 if (!ReferenceEquals(block.Instructions[i], target)) continue;
 
-                // Scan backward to find the nearest IrNewObj for a collection type
+                // Scan backward in this block for the nearest IrNewObj or IrLoadLocal
                 for (int j = i - 1; j >= 0; j--)
                 {
                     if (block.Instructions[j] is IrNewObj { TypeName: var tn })
+                        return ResolveCollectionType(tn);
+
+                    // If receiver was loaded from a local, trace back to what was stored there
+                    if (block.Instructions[j] is IrLoadLocal { Index: var localIdx })
                     {
-                        if (tn.StartsWith("System.Collections.Generic.HashSet"))
-                            return typeof(HashSet<object>);
-                        if (tn.StartsWith("System.Collections.Generic.Dictionary"))
-                            return typeof(Dictionary<object, object>);
-                        if (tn.StartsWith("System.Collections.Generic.List"))
-                            return typeof(List<object>);
+                        var resolved = TraceLocalToNewObj(localIdx, func);
+                        if (resolved is not null) return resolved;
                     }
                 }
             }
         }
         return typeof(List<object>); // Safe default — List<object>.Add is the original behavior
+    }
+
+    /// <summary>
+    /// Traces a local variable assignment back to find the IrNewObj that produced its value.
+    /// Scans all basic blocks for IrStoreLocal(idx) preceded by IrNewObj.
+    /// </summary>
+    private static Type? TraceLocalToNewObj(int localIdx, IrFunction func)
+    {
+        foreach (var block in func.Body)
+        {
+            for (int i = 0; i < block.Instructions.Count; i++)
+            {
+                if (block.Instructions[i] is IrStoreLocal { Index: var storeIdx } && storeIdx == localIdx && i > 0)
+                {
+                    if (block.Instructions[i - 1] is IrNewObj { TypeName: var tn })
+                        return ResolveCollectionType(tn);
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Type ResolveCollectionType(string typeName)
+    {
+        if (typeName.StartsWith("System.Collections.Generic.HashSet"))
+            return typeof(HashSet<object>);
+        if (typeName.StartsWith("System.Collections.Generic.Dictionary"))
+            return typeof(Dictionary<object, object>);
+        return typeof(List<object>);
     }
 
     private Type InferStackTopType(IrInstruction target, IrFunction func)
@@ -4396,10 +4910,12 @@ public sealed class CilEmitter
 
     private static Type ResolveVirtualCallReturnType(string name, int argc)
     {
-        var pascal = Semantics.DotNetTypeResolver.SnakeToPascal(name);
+        var resolved = PythonStringAliases.TryGetValue(name, out var alias)
+            ? alias
+            : Semantics.DotNetTypeResolver.SnakeToPascal(name);
         foreach (var type in new[] { typeof(string), typeof(object) })
         {
-            var m = FindDotNetMethod(type, pascal, argc, false);
+            var m = FindDotNetMethod(type, resolved, argc, false);
             if (m is not null) return m.ReturnType;
         }
         return typeof(object);

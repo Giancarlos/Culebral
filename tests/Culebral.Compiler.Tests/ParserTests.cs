@@ -210,6 +210,19 @@ public class ParserTests
     }
 
     [Fact]
+    public void ListComprehension_NestedClauses_Parses()
+    {
+        var ast = Parse("x = [i + j for i in rows for j in cols if j > 0]\n");
+        var assign = Assert.IsType<AssignmentStatement>(ast.Statements[0]);
+        var comp = Assert.IsType<ListComprehension>(assign.Value);
+        Assert.Equal(2, comp.Clauses.Count);
+        Assert.Equal("i", comp.Clauses[0].Variable);
+        Assert.Null(comp.Clauses[0].Condition);
+        Assert.Equal("j", comp.Clauses[1].Variable);
+        Assert.NotNull(comp.Clauses[1].Condition);
+    }
+
+    [Fact]
     public void Lambda_Parses()
     {
         var ast = Parse("f = lambda x: x * 2\n");
@@ -417,5 +430,61 @@ public class ParserTests
         Assert.Equal("str", first.Name);
         var second = Assert.IsType<IdentifierExpr>(tuple.Elements[1]);
         Assert.Equal("int", second.Name);
+    }
+
+    [Fact]
+    public void SetComprehension_Parses()
+    {
+        var ast = Parse("x = {i * 2 for i in items}\n");
+        var assign = Assert.IsType<AssignmentStatement>(ast.Statements[0]);
+        var setComp = Assert.IsType<SetComprehension>(assign.Value);
+        Assert.IsType<BinaryExpr>(setComp.Element);
+        Assert.Single(setComp.Clauses);
+        Assert.Equal("i", setComp.Clauses[0].Variable);
+        Assert.IsType<IdentifierExpr>(setComp.Clauses[0].Iterable);
+        Assert.Null(setComp.Clauses[0].Condition);
+    }
+
+    [Fact]
+    public void SetComprehension_WithCondition_Parses()
+    {
+        var ast = Parse("x = {i for i in items if i > 0}\n");
+        var assign = Assert.IsType<AssignmentStatement>(ast.Statements[0]);
+        var setComp = Assert.IsType<SetComprehension>(assign.Value);
+        Assert.Single(setComp.Clauses);
+        Assert.Equal("i", setComp.Clauses[0].Variable);
+        Assert.NotNull(setComp.Clauses[0].Condition);
+    }
+
+    [Fact]
+    public void GeneratorExpr_Parses()
+    {
+        var ast = Parse("x = list(i * 2 for i in items)\n");
+        var assign = Assert.IsType<AssignmentStatement>(ast.Statements[0]);
+        var call = Assert.IsType<CallExpr>(assign.Value);
+        Assert.Single(call.Arguments);
+        Assert.IsType<GeneratorExpr>(call.Arguments[0].Value);
+    }
+
+    [Fact]
+    public void WithStatement_AsNotConsumedByExpression()
+    {
+        // Ensure 'as' in with statement context is not consumed by expression parser
+        var ast = Parse("with open(\"file.txt\") as f:\n    pass\n");
+        var withStmt = Assert.IsType<WithStatement>(ast.Statements[0]);
+        Assert.Equal("f", withStmt.Items[0].Variable);
+    }
+
+    [Fact]
+    public void Decorator_WithArguments_Parses()
+    {
+        var source = "@Route(\"/api\")\ndef handler():\n    pass\n";
+        var ast = Parse(source);
+        var func = Assert.IsType<FunctionDef>(ast.Statements[0]);
+        Assert.Single(func.Decorators);
+        var call = Assert.IsType<CallExpr>(func.Decorators[0].Expr);
+        var callee = Assert.IsType<IdentifierExpr>(call.Callee);
+        Assert.Equal("Route", callee.Name);
+        Assert.Single(call.Arguments);
     }
 }

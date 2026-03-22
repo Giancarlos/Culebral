@@ -33,6 +33,9 @@ public sealed class IrTypeDef
 
     /// <summary>Generic type parameters with optional constraints (e.g., T: Printable).</summary>
     public List<IrTypeParameter> TypeParameters { get; } = [];
+
+    /// <summary>Decorators from the source, for attribute emission on the type.</summary>
+    public List<IrDecorator>? Decorators { get; set; }
 }
 
 /// <summary>A generic type parameter with an optional constraint type name.</summary>
@@ -83,8 +86,8 @@ public sealed class IrFunction
     public bool IsEntryPoint { get; init; }
     public string? DeclaringType { get; init; }
 
-    /// <summary>Decorator names from the source, for attribute emission.</summary>
-    public List<string>? Decorators { get; init; }
+    /// <summary>Decorators from the source, for attribute emission.</summary>
+    public List<IrDecorator>? Decorators { get; init; }
 
     /// <summary>Local variable declarations, in order of first use.</summary>
     public List<IrLocal> Locals { get; } = [];
@@ -103,6 +106,19 @@ public sealed class IrLocal
     public required string Name { get; init; }
     public required CulebralType Type { get; init; }
     public int Index { get; set; }
+}
+
+// ─── Decorators ───
+
+/// <summary>
+/// A decorator applied to a function or class, carrying the name and optional arguments
+/// for .NET custom attribute emission.
+/// </summary>
+public sealed class IrDecorator
+{
+    public required string Name { get; init; }
+    /// <summary>Positional arguments (constant values: string, int, bool, etc.).</summary>
+    public List<object?> Arguments { get; init; } = [];
 }
 
 // ─── Basic Blocks ───

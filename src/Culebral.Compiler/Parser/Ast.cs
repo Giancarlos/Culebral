@@ -36,6 +36,7 @@ public sealed record PassStatement(SourceSpan Span) : Statement(Span);
 
 public sealed record RaiseStatement(
     Expression? Value,
+    Expression? Cause,
     SourceSpan Span) : Statement(Span);
 
 public sealed record AssertStatement(
@@ -154,6 +155,10 @@ public sealed record ConstructorPattern(
 
 public sealed record NonePattern(SourceSpan Span) : Pattern(Span);
 
+public sealed record OrPattern(
+    List<Pattern> Alternatives,
+    SourceSpan Span) : Pattern(Span);
+
 // ─── Import ───
 
 public sealed record ImportStatement(
@@ -200,6 +205,7 @@ public sealed record ClassDef(
     List<TypeParameter>? TypeParameters,
     List<TypeAnnotation> Bases,
     List<AstNode> Members,
+    List<Decorator> Decorators,
     SourceSpan Span) : Statement(Span);
 
 public sealed record StructDef(
@@ -303,7 +309,7 @@ public sealed record FStringExpr(
 
 public abstract record FStringPart(SourceSpan Span) : AstNode(Span);
 public sealed record FStringText(string Text, SourceSpan Span) : FStringPart(Span);
-public sealed record FStringInterpolation(Expression Expr, SourceSpan Span) : FStringPart(Span);
+public sealed record FStringInterpolation(Expression Expr, string? FormatSpec, SourceSpan Span) : FStringPart(Span);
 
 public sealed record BoolLiteralExpr(bool Value, SourceSpan Span) : Expression(Span);
 
@@ -312,6 +318,9 @@ public sealed record NoneLiteralExpr(SourceSpan Span) : Expression(Span);
 public sealed record IdentifierExpr(string Name, SourceSpan Span) : Expression(Span);
 
 public sealed record FieldAccessExpr(string FieldName, SourceSpan Span) : Expression(Span);
+
+/// <summary>Starred expression for catch-all unpacking: *rest in a, *rest = [1,2,3]</summary>
+public sealed record StarredExpr(Expression Operand, SourceSpan Span) : Expression(Span);
 
 public sealed record BinaryExpr(
     Expression Left,
@@ -395,26 +404,31 @@ public sealed record InExpr(
     bool Negated,
     SourceSpan Span) : Expression(Span);
 
-public sealed record ListComprehension(
-    Expression Element,
+public sealed record ComprehensionClause(
     string Variable,
     Expression Iterable,
     Expression? Condition,
+    SourceSpan Span) : AstNode(Span);
+
+public sealed record ListComprehension(
+    Expression Element,
+    List<ComprehensionClause> Clauses,
     SourceSpan Span) : Expression(Span);
 
 public sealed record DictComprehension(
     Expression Key,
     Expression Value,
-    string Variable,
-    Expression Iterable,
-    Expression? Condition,
+    List<ComprehensionClause> Clauses,
     SourceSpan Span) : Expression(Span);
 
 public sealed record GeneratorExpr(
     Expression Element,
-    string Variable,
-    Expression Iterable,
-    Expression? Condition,
+    List<ComprehensionClause> Clauses,
+    SourceSpan Span) : Expression(Span);
+
+public sealed record SetComprehension(
+    Expression Element,
+    List<ComprehensionClause> Clauses,
     SourceSpan Span) : Expression(Span);
 
 public sealed record WithExpr(

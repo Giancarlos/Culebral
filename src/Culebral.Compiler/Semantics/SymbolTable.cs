@@ -120,6 +120,14 @@ public static class BuiltinSymbols
         DeclareFunction(scope, "set", [PrimitiveType.Object], PrimitiveType.Object);
         DeclareFunction(scope, "hash", [PrimitiveType.Object], PrimitiveType.Int);
         DeclareFunction(scope, "reversed", [PrimitiveType.Object], PrimitiveType.Object);
+        DeclareFunction(scope, "hex", [PrimitiveType.Int], PrimitiveType.Str);
+        DeclareFunction(scope, "bin", [PrimitiveType.Int], PrimitiveType.Str);
+        DeclareFunction(scope, "oct", [PrimitiveType.Int], PrimitiveType.Str);
+        DeclareFunction(scope, "divmod", [PrimitiveType.Int, PrimitiveType.Int], PrimitiveType.Object);
+        DeclareFunction(scope, "pow", [PrimitiveType.Object, PrimitiveType.Object], PrimitiveType.Object);
+        DeclareFunction(scope, "repr", [PrimitiveType.Object], PrimitiveType.Str);
+        DeclareFunction(scope, "format", [PrimitiveType.Object], PrimitiveType.Str);
+        DeclareFunction(scope, "tuple", [PrimitiveType.Object], PrimitiveType.Object);
 
         // Testing assertion helpers
         DeclareFunction(scope, "assert_equal", [PrimitiveType.Object, PrimitiveType.Object], PrimitiveType.Void);

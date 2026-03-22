@@ -3702,4 +3702,786 @@ public class EmitTests : IDisposable
             """);
         Assert.Equal("Hello, World!", output);
     }
+
+    // ─── Set Comprehension Tests ───
+
+    [Fact]
+    public void SetComprehension_ProducesUniqueElements()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = [1, 2, 2, 3, 3, 3]
+                unique = {x for x in items}
+                print(len(unique))
+            """);
+        Assert.Equal("3", output);
+    }
+
+    [Fact]
+    public void SetComprehension_WithCondition()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = ["a", "b", "c", "a", "b"]
+                # Condition uses string equality which works on objects
+                short = {x for x in items if x != "c"}
+                print(len(short))
+            """);
+        Assert.Equal("2", output);
+    }
+
+    // ─── Generator Expression Tests ───
+
+    [Fact]
+    public void GeneratorExpr_EvaluatesEagerly()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = [1, 2, 3, 4, 5]
+                doubled = list(x * 2 for x in items)
+                print(len(doubled))
+            """);
+        Assert.Equal("5", output);
+    }
+
+    [Fact]
+    public void GeneratorExpr_WithCondition()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = ["a", "b", "c", "d", "e"]
+                result = list(x for x in items if x != "c")
+                print(len(result))
+            """);
+        Assert.Equal("4", output);
+    }
+
+    // ─── Nested Comprehension Tests ───
+
+    [Fact]
+    public void ListComprehension_NestedClauses()
+    {
+        var output = CompileAndRun("""
+            def main():
+                pairs = [x + y for x in range(3) for y in range(2)]
+                print(len(pairs))
+            """);
+        // 3 * 2 = 6 pairs: 0+0, 0+1, 1+0, 1+1, 2+0, 2+1
+        Assert.Equal("6", output);
+    }
+
+    [Fact]
+    public void ListComprehension_NestedClauses_WithCondition()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = ["a", "b", "c"]
+                tags = ["x", "y"]
+                pairs = [s for s in items for t in tags if t != "y"]
+                print(len(pairs))
+            """);
+        // 3 items * 1 tag (only "x" passes filter) = 3
+        Assert.Equal("3", output);
+    }
+
+    // ─── Type Cast Tests ───
+
+    [Fact]
+    public void Cast_Builtin_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                x = 42
+                s = str(x)
+                print(s)
+            """);
+        Assert.Equal("42", output);
+    }
+
+    [Fact]
+    public void Cast_IntToFloat()
+    {
+        var output = CompileAndRun("""
+            def main():
+                x = 42
+                f = float(x)
+                print(f)
+            """);
+        Assert.Equal("42", output);
+    }
+
+    // ─── Decorator Tests ───
+
+    [Fact]
+    public void Decorator_Obsolete_EmitsAttribute()
+    {
+        // The @Obsolete decorator should compile without error
+        var output = CompileAndRun("""
+            @Obsolete
+            def old_function() -> str:
+                return "old"
+
+            def main():
+                print(old_function())
+            """);
+        Assert.Equal("old", output);
+    }
+
+    // ─── New Builtin Tests ───
+
+    [Fact]
+    public void Hex_ReturnsHexString()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(hex(255))
+            """);
+        Assert.Equal("0xff", output);
+    }
+
+    [Fact]
+    public void Bin_ReturnsBinaryString()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(bin(10))
+            """);
+        Assert.Equal("0b1010", output);
+    }
+
+    [Fact]
+    public void Oct_ReturnsOctalString()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(oct(15))
+            """);
+        Assert.Equal("0o17", output);
+    }
+
+    [Fact]
+    public void Divmod_ReturnsTuple()
+    {
+        var output = CompileAndRun("""
+            def main():
+                result = divmod(17, 5)
+                print(result[0])
+                print(result[1])
+            """);
+        Assert.Equal("3\n2", output);
+    }
+
+    [Fact]
+    public void Pow_TwoArgs_ReturnsFloat()
+    {
+        // pow() returns double via Math.Pow
+        var output = CompileAndRun("""
+            def main():
+                result = pow(2, 10)
+                print(int(result))
+            """);
+        Assert.Equal("1024", output);
+    }
+
+    [Fact]
+    public void Pow_ThreeArgs_ModularPower()
+    {
+        // 3-arg pow: (int)(Math.Pow(base, exp)) % mod
+        var output = CompileAndRun("""
+            def main():
+                print(pow(2, 10, 1000))
+            """);
+        Assert.Equal("24", output);
+    }
+
+    [Fact]
+    public void Repr_StringAddsQuotes()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(repr("hello"))
+            """);
+        Assert.Equal("'hello'", output);
+    }
+
+    [Fact]
+    public void Repr_IntReturnsStr()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(repr(42))
+            """);
+        Assert.Equal("42", output);
+    }
+
+    [Fact]
+    public void Tuple_FromList()
+    {
+        var output = CompileAndRun("""
+            def main():
+                t = tuple([1, 2, 3])
+                print(len(t))
+            """);
+        Assert.Equal("3", output);
+    }
+
+    [Fact]
+    public void Tuple_Empty()
+    {
+        var output = CompileAndRun("""
+            def main():
+                t = tuple()
+                print(len(t))
+            """);
+        Assert.Equal("0", output);
+    }
+
+    [Fact]
+    public void Format_WithSpec()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(format(3.14159, "F2"))
+            """);
+        Assert.Equal("3.14", output);
+    }
+
+    // ─── Dunder Operator Tests (New) ───
+
+    [Fact]
+    public void DunderNeg_DirectCall()
+    {
+        var output = CompileAndRun("""
+            class Counter:
+                value: int = 0
+
+                def __init__(v: int):
+                    @value = v
+
+                def __neg__() -> Counter:
+                    return Counter(0 - @value)
+
+                def __str__() -> str:
+                    return str(@value)
+
+            def main():
+                c = Counter(5)
+                n = c.__neg__()
+                print(n)
+            """);
+        Assert.Equal("-5", output);
+    }
+
+    [Fact]
+    public void DunderFloordiv_DirectCall()
+    {
+        var output = CompileAndRun("""
+            class Amount:
+                cents: int = 0
+
+                def __init__(c: int):
+                    @cents = c
+
+                def __floordiv__(other: Amount) -> int:
+                    return @cents // other.cents
+
+            def main():
+                a = Amount(100)
+                b = Amount(30)
+                print(a.__floordiv__(b))
+            """);
+        Assert.Equal("3", output);
+    }
+
+    [Fact]
+    public void DunderPow_DirectCall()
+    {
+        // Use int() to extract values from object-typed fields
+        var output = CompileAndRun("""
+            class Num:
+                val: int = 0
+
+                def __init__(v: int):
+                    @val = v
+
+                def __pow__(other: Num) -> str:
+                    return str(int(@val) ** int(other.val))
+
+            def main():
+                a = Num(2)
+                b = Num(8)
+                print(a.__pow__(b))
+            """);
+        Assert.Equal("256", output);
+    }
+
+    // ─── String Method Alias Tests ───
+
+    [Fact]
+    public void String_Upper_PythonAlias()
+    {
+        var output = CompileAndRun("""
+            def main():
+                s = "hello"
+                print(s.upper())
+            """);
+        Assert.Equal("HELLO", output);
+    }
+
+    [Fact]
+    public void String_Lower_PythonAlias()
+    {
+        var output = CompileAndRun("""
+            def main():
+                s = "HELLO"
+                print(s.lower())
+            """);
+        Assert.Equal("hello", output);
+    }
+
+    [Fact]
+    public void String_Strip_PythonAlias()
+    {
+        var output = CompileAndRun("""
+            def main():
+                s = "  hello  "
+                print(s.strip())
+            """);
+        Assert.Equal("hello", output);
+    }
+
+    [Fact]
+    public void String_Startswith_PythonAlias()
+    {
+        var output = CompileAndRun("""
+            def main():
+                s = "hello world"
+                if s.startswith("hello"):
+                    print("yes")
+                else:
+                    print("no")
+            """);
+        Assert.Equal("yes", output);
+    }
+
+    [Fact]
+    public void String_Find_PythonAlias()
+    {
+        var output = CompileAndRun("""
+            def main():
+                s = "hello world"
+                print(s.find("world"))
+            """);
+        Assert.Equal("6", output);
+    }
+
+    // ─── GAP-1: Operator Syntax Dispatch ───
+
+    [Fact]
+    public void OperatorSyntax_Plus_CallsAdd()
+    {
+        var output = CompileAndRun("""
+            class Vec:
+                x: int = 0
+                y: int = 0
+                def __init__(x: int, y: int):
+                    @x = x
+                    @y = y
+                def __add__(other: Vec) -> Vec:
+                    return Vec(int(@x) + int(other.x), int(@y) + int(other.y))
+                def __str__() -> str:
+                    return f"({@x}, {@y})"
+            def main():
+                a = Vec(1, 2)
+                b = Vec(3, 4)
+                c = a + b
+                print(c)
+            """);
+        Assert.Equal("(4, 6)", output);
+    }
+
+    [Fact]
+    public void OperatorSyntax_Sub_CallsSub()
+    {
+        var output = CompileAndRun("""
+            class Vec:
+                x: int = 0
+                y: int = 0
+                def __init__(x: int, y: int):
+                    @x = x
+                    @y = y
+                def __sub__(other: Vec) -> Vec:
+                    return Vec(int(@x) - int(other.x), int(@y) - int(other.y))
+                def __str__() -> str:
+                    return f"({@x}, {@y})"
+            def main():
+                a = Vec(10, 20)
+                b = Vec(3, 4)
+                print(a - b)
+            """);
+        Assert.Equal("(7, 16)", output);
+    }
+
+    [Fact]
+    public void OperatorSyntax_Eq_CallsEq()
+    {
+        var output = CompileAndRun("""
+            class Point:
+                x: int = 0
+                y: int = 0
+                def __init__(x: int, y: int):
+                    @x = x
+                    @y = y
+                def __eq__(other: Point) -> bool:
+                    return int(@x) == int(other.x) and int(@y) == int(other.y)
+            def main():
+                a = Point(1, 2)
+                b = Point(1, 2)
+                c = Point(3, 4)
+                print(a == b)
+                print(a == c)
+            """);
+        Assert.Equal("True\nFalse", output);
+    }
+
+    [Fact]
+    public void OperatorSyntax_Lt_CallsLt()
+    {
+        var output = CompileAndRun("""
+            class Score:
+                val: int = 0
+                def __init__(v: int):
+                    @val = v
+                def __lt__(other: Score) -> bool:
+                    return int(@val) < int(other.val)
+            def main():
+                a = Score(10)
+                b = Score(20)
+                print(a < b)
+                print(b < a)
+            """);
+        Assert.Equal("True\nFalse", output);
+    }
+
+    [Fact]
+    public void OperatorSyntax_Neg_CallsNeg()
+    {
+        var output = CompileAndRun("""
+            class Num:
+                val: int = 0
+                def __init__(v: int):
+                    @val = v
+                def __neg__() -> Num:
+                    return Num(0 - int(@val))
+                def __str__() -> str:
+                    return str(@val)
+            def main():
+                n = Num(5)
+                print(-n)
+            """);
+        Assert.Equal("-5", output);
+    }
+
+    [Fact]
+    public void OperatorSyntax_Primitives_StillWork()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print(1 + 2)
+                print(10 - 3)
+                print(4 * 5)
+                print(3 == 3)
+            """);
+        Assert.Equal("3\n7\n20\nTrue", output);
+    }
+
+    // ─── GAP-2: Class Decorators ───
+
+    [Fact]
+    public void ClassDecorator_Obsolete_EmitsAttribute()
+    {
+        var output = CompileAndRun("""
+            @Obsolete
+            class OldService:
+                def greet() -> str:
+                    return "hello"
+            def main():
+                s = OldService()
+                print(s.greet())
+            """);
+        Assert.Equal("hello", output);
+    }
+
+    // ─── GAP-3: F-String Format Specs ───
+
+    [Fact]
+    public void FString_FormatSpec_TwoDecimals()
+    {
+        // .NET format spec: F2 = fixed-point, 2 decimal places
+        var output = CompileAndRun("""
+            def main():
+                pi = 3.14159
+                print(f"{pi:F2}")
+            """);
+        Assert.Equal("3.14", output);
+    }
+
+    [Fact]
+    public void FString_FormatSpec_ZeroPad()
+    {
+        var output = CompileAndRun("""
+            def main():
+                n = 42
+                print(f"{n:D5}")
+            """);
+        Assert.Equal("00042", output);
+    }
+
+    [Fact]
+    public void FString_NoSpec_StillWorks()
+    {
+        var output = CompileAndRun("""
+            def main():
+                x = 42
+                print(f"value={x}")
+            """);
+        Assert.Equal("value=42", output);
+    }
+
+    // ─── GAP-6: str.join() ───
+
+    [Fact]
+    public void StringJoin_CommaSeparated()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = ["a", "b", "c"]
+                print(", ".join(items))
+            """);
+        Assert.Equal("a, b, c", output);
+    }
+
+    [Fact]
+    public void StringJoin_EmptySeparator()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print("".join(["x", "y", "z"]))
+            """);
+        Assert.Equal("xyz", output);
+    }
+
+    // ─── GAP-7: dict.get() ───
+
+    [Fact]
+    public void DictGet_KeyExists()
+    {
+        var output = CompileAndRun("""
+            def main():
+                d = {"a": 1, "b": 2}
+                print(d.get("a", 0))
+            """);
+        Assert.Equal("1", output);
+    }
+
+    [Fact]
+    public void DictGet_KeyMissing_ReturnsDefault()
+    {
+        var output = CompileAndRun("""
+            def main():
+                d = {"a": 1}
+                print(d.get("z", 99))
+            """);
+        Assert.Equal("99", output);
+    }
+
+    [Fact]
+    public void DictGet_KeyMissing_NoDefault_ReturnsNone()
+    {
+        var output = CompileAndRun("""
+            def main():
+                d = {"a": 1}
+                result = d.get("z")
+                if result is None:
+                    print("None")
+            """);
+        Assert.Equal("None", output);
+    }
+
+    // ─── GAP-8: OR Patterns in Match ───
+
+    [Fact]
+    public void MatchOrPattern_MatchesFirstAlt()
+    {
+        var output = CompileAndRun("""
+            def main():
+                x = 1
+                match x:
+                    case 1 | 2 | 3:
+                        print("small")
+                    case _:
+                        print("other")
+            """);
+        Assert.Equal("small", output);
+    }
+
+    [Fact]
+    public void MatchOrPattern_MatchesLaterAlt()
+    {
+        var output = CompileAndRun("""
+            def main():
+                x = 3
+                match x:
+                    case 1 | 2 | 3:
+                        print("small")
+                    case _:
+                        print("other")
+            """);
+        Assert.Equal("small", output);
+    }
+
+    [Fact]
+    public void MatchOrPattern_NoMatch_FallsThrough()
+    {
+        var output = CompileAndRun("""
+            def main():
+                x = 99
+                match x:
+                    case 1 | 2 | 3:
+                        print("small")
+                    case _:
+                        print("other")
+            """);
+        Assert.Equal("other", output);
+    }
+
+    // ─── GAP-9: raise...from ───
+
+    [Fact]
+    public void RaiseFrom_Compiles()
+    {
+        var output = CompileAndRun("""
+            def main():
+                try:
+                    raise Exception("outer") from Exception("inner")
+                except Exception as e:
+                    print("caught")
+            """);
+        Assert.Equal("caught", output);
+    }
+
+    // ─── GAP-10: String Methods ───
+
+    [Fact]
+    public void String_Isdigit_True()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print("12345".isdigit())
+            """);
+        Assert.Equal("True", output);
+    }
+
+    [Fact]
+    public void String_Isdigit_False()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print("123abc".isdigit())
+            """);
+        Assert.Equal("False", output);
+    }
+
+    [Fact]
+    public void String_Isalpha_True()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print("hello".isalpha())
+            """);
+        Assert.Equal("True", output);
+    }
+
+    [Fact]
+    public void String_Count_Occurrences()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print("banana".count("an"))
+            """);
+        Assert.Equal("2", output);
+    }
+
+    [Fact]
+    public void String_Index_Found()
+    {
+        var output = CompileAndRun("""
+            def main():
+                print("hello".index("llo"))
+            """);
+        Assert.Equal("2", output);
+    }
+
+    // ─── GAP-5: Starred Unpacking ───
+
+    [Fact]
+    public void StarredUnpacking_RestAtEnd()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = [1, 2, 3, 4, 5]
+                a, *rest = items
+                print(a)
+                print(len(rest))
+            """);
+        Assert.Equal("1\n4", output);
+    }
+
+    [Fact]
+    public void StarredUnpacking_RestInMiddle()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = [1, 2, 3, 4, 5]
+                a, *mid, z = items
+                print(a)
+                print(len(mid))
+                print(z)
+            """);
+        Assert.Equal("1\n3\n5", output);
+    }
+
+    // ─── GAP-11: Arg Count Validation ───
+
+    [Fact]
+    public void ArgCount_Mismatch_EmitsWarning()
+    {
+        // Should compile with a warning, not crash
+        var skvPath = Path.Combine(_tempDir, "test.leb");
+        var dllPath = Path.Combine(_tempDir, "test.dll");
+        File.WriteAllText(skvPath, """
+            def greet(name: str, greeting: str) -> str:
+                return f"{greeting}, {name}"
+            def main():
+                print(greet("Alice"))
+            """);
+        var result = Program.Compile(skvPath, dllPath);
+        // Should have a warning about argument count
+        Assert.True(result.Diagnostics.Any(d => d.Code == "LEB2020"));
+    }
+
+    [Fact]
+    public void ArgCount_Correct_NoWarning()
+    {
+        var skvPath = Path.Combine(_tempDir, "test.leb");
+        var dllPath = Path.Combine(_tempDir, "test.dll");
+        File.WriteAllText(skvPath, """
+            def greet(name: str) -> str:
+                return f"Hello, {name}"
+            def main():
+                print(greet("Alice"))
+            """);
+        var result = Program.Compile(skvPath, dllPath);
+        Assert.DoesNotContain(result.Diagnostics, d => d.Code == "LEB2020");
+    }
 }

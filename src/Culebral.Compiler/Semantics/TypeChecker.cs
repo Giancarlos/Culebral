@@ -643,6 +643,21 @@ public sealed class TypeChecker
                         }
                     }
                 }
+                else if (tupleTarget.Elements[i] is StarredExpr starred &&
+                         starred.Operand is IdentifierExpr starredIdent)
+                {
+                    // Starred unpacking: *rest gets a list
+                    var existing = _currentScope.LookupLocal(starredIdent.Name);
+                    if (existing is null)
+                    {
+                        _currentScope.TryDeclare(new Symbol
+                        {
+                            Name = starredIdent.Name,
+                            Kind = SymbolKind.Variable,
+                            Type = PrimitiveType.Object, // List<object>
+                        });
+                    }
+                }
                 else
                 {
                     // Non-identifier target (e.g. member access, index) — just type-check it
@@ -834,7 +849,12 @@ public sealed class TypeChecker
 
             ListComprehension comp => InferListComprehension(comp),
             DictComprehension => PrimitiveType.Object,
-            GeneratorExpr => PrimitiveType.Object,
+            GeneratorExpr gen => InferGeneratorExpr(gen),
+            SetComprehension => new GenericInstanceType("set", [PrimitiveType.Object], typeof(HashSet<object>)),
+
+            TypeCastExpr cast => ResolveTypeAnnotation(cast.Type),
+
+            StarredExpr starred => InferType(starred.Operand),
 
             WithExpr with_ => InferType(with_.Source),
 
@@ -948,6 +968,16 @@ public sealed class TypeChecker
         return operandType;
     }
 
+    // Builtins with variable arg counts — skip validation
+    private static readonly HashSet<string> _varArgBuiltins = [
+        "print", "range", "int", "round", "min", "max", "pow", "format",
+        "list", "dict", "set", "tuple", "hash", "reversed", "sorted",
+        "enumerate", "zip", "map", "filter", "isinstance", "all", "any", "sum",
+        "hex", "bin", "oct", "divmod", "repr", "bool", "float", "str",
+        "abs", "chr", "ord", "type", "input", "len", "open",
+        "assert_equal", "assert_not_equal", "cast",
+    ];
+
     private CulebralType InferCall(CallExpr call)
     {
         var calleeType = InferType(call.Callee);
@@ -955,8 +985,20 @@ public sealed class TypeChecker
         foreach (var arg in call.Arguments)
             InferType(arg.Value);
 
+        // Validate argument count for user-defined functions
         if (calleeType is FunctionType funcType)
+        {
+            if (call.Callee is IdentifierExpr callId && !_varArgBuiltins.Contains(callId.Name))
+            {
+                var expected = funcType.ParameterTypes.Length;
+                var actual = call.Arguments.Count;
+                if (actual != expected)
+                    _diagnostics.Warning("LEB2020",
+                        $"'{callId.Name}' expects {expected} argument(s), got {actual}",
+                        call.Span);
+            }
             return funcType.ReturnType;
+        }
 
         // Constructor call — type name used as function
         if (call.Callee is IdentifierExpr ident)
@@ -1230,24 +1272,53 @@ public sealed class TypeChecker
 
     private CulebralType InferListComprehension(ListComprehension comp)
     {
-        InferType(comp.Iterable);
-        if (comp.Condition is not null)
-            InferType(comp.Condition);
-
-        // Create a scope for the comprehension variable
+        // Create a scope for all comprehension clauses (variables, conditions) and element
         var compScope = _currentScope.CreateChild("<comprehension>");
-        compScope.TryDeclare(new Symbol
-        {
-            Name = comp.Variable,
-            Kind = SymbolKind.Variable,
-            Type = PrimitiveType.Object,
-        });
-
         var prevScope = _currentScope;
         _currentScope = compScope;
+
+        foreach (var clause in comp.Clauses)
+        {
+            InferType(clause.Iterable);
+            compScope.TryDeclare(new Symbol
+            {
+                Name = clause.Variable,
+                Kind = SymbolKind.Variable,
+                Type = PrimitiveType.Object,
+            });
+            if (clause.Condition is not null)
+                InferType(clause.Condition);
+        }
+
         var elemType = InferType(comp.Element);
         _currentScope = prevScope;
 
+        return new GenericInstanceType("list", [elemType], null);
+    }
+
+    private CulebralType InferGeneratorExpr(GeneratorExpr gen)
+    {
+        var compScope = _currentScope.CreateChild("<generator>");
+        var prevScope = _currentScope;
+        _currentScope = compScope;
+
+        foreach (var clause in gen.Clauses)
+        {
+            InferType(clause.Iterable);
+            compScope.TryDeclare(new Symbol
+            {
+                Name = clause.Variable,
+                Kind = SymbolKind.Variable,
+                Type = PrimitiveType.Object,
+            });
+            if (clause.Condition is not null)
+                InferType(clause.Condition);
+        }
+
+        var elemType = InferType(gen.Element);
+        _currentScope = prevScope;
+
+        // Generator expressions are eagerly evaluated as lists for now
         return new GenericInstanceType("list", [elemType], null);
     }
 

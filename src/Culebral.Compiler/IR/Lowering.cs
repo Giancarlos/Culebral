@@ -190,6 +190,10 @@ public sealed class IrLowering
             BaseType = baseTypeName,
         };
 
+        // Extract and attach class decorators for attribute emission
+        if (cls.Decorators.Count > 0)
+            typeDef.Decorators = ExtractDecorators(cls.Decorators);
+
         // Carry generic type parameters with constraints
         if (cls.TypeParameters is not null)
         {
@@ -747,22 +751,8 @@ public sealed class IrLowering
         var entryBlock = new IrBasicBlock { Label = NewBlockLabel("entry") };
         var body = new List<IrBasicBlock> { entryBlock };
 
-        // Extract decorator names for attribute emission
-        List<string>? decoratorNames = null;
-        if (func.Decorators.Count > 0)
-        {
-            decoratorNames = func.Decorators
-                .Select(d => d.Expr switch
-                {
-                    IdentifierExpr id => id.Name,
-                    CallExpr { Callee: IdentifierExpr callId } => callId.Name,
-                    MemberAccessExpr ma => $"{ma.Object}.{ma.Member}",
-                    _ => null,
-                })
-                .Where(n => n is not null)
-                .Cast<string>()
-                .ToList();
-        }
+        // Extract decorators for attribute emission
+        var decorators = ExtractDecorators(func.Decorators);
 
         var irFunc = new IrFunction
         {
@@ -773,7 +763,7 @@ public sealed class IrLowering
             IsStatic = true,
             IsAsync = func.IsAsync,
             IsEntryPoint = func.Name == "main",
-            Decorators = decoratorNames,
+            Decorators = decorators,
         };
 
         _currentFunction = irFunc;
@@ -815,22 +805,8 @@ public sealed class IrLowering
         var entryBlock = new IrBasicBlock { Label = NewBlockLabel("entry") };
         var body = new List<IrBasicBlock> { entryBlock };
 
-        // Extract decorator names for attribute emission
-        List<string>? decoratorNames = null;
-        if (method.Decorators.Count > 0)
-        {
-            decoratorNames = method.Decorators
-                .Select(d => d.Expr switch
-                {
-                    IdentifierExpr id => id.Name,
-                    CallExpr { Callee: IdentifierExpr callId } => callId.Name,
-                    MemberAccessExpr ma => $"{ma.Object}.{ma.Member}",
-                    _ => null,
-                })
-                .Where(n => n is not null)
-                .Cast<string>()
-                .ToList();
-        }
+        // Extract decorators for attribute emission
+        var decorators = ExtractDecorators(method.Decorators);
 
         var irFunc = new IrFunction
         {
@@ -841,7 +817,7 @@ public sealed class IrLowering
             IsStatic = false,
             IsAsync = method.IsAsync,
             DeclaringType = declaringType,
-            Decorators = decoratorNames,
+            Decorators = decorators,
         };
 
         var prevFunction = _currentFunction;
@@ -1011,7 +987,14 @@ public sealed class IrLowering
             case RaiseStatement raise:
                 if (raise.Value is not null)
                     LowerExpression(raise.Value);
-                _currentBlock.Emit(new IrThrow(raise.Span));
+                if (raise.Cause is not null)
+                {
+                    // raise X from Y: lower cause but drop it for now
+                    // Full InnerException injection requires detecting constructor calls
+                    LowerExpression(raise.Cause);
+                    _currentBlock!.Emit(new IrPop(raise.Span));
+                }
+                _currentBlock!.Emit(new IrThrow(raise.Span));
                 break;
 
             case AssertStatement assertStmt:
@@ -1665,6 +1648,32 @@ public sealed class IrLowering
                     break;
                 }
 
+                // ── User-defined operator dispatch ──
+                var dunderName = BinaryOpToDunder(binOp);
+                if (dunderName is not null)
+                {
+                    var leftTypeName = leftType?.DisplayName;
+                    if (leftTypeName is not null && _typeDefs.TryGetValue(leftTypeName, out var opTypeDef) &&
+                        opTypeDef.Methods.Any(m => m.Name == dunderName))
+                    {
+                        LowerExpression(bin.Left);
+                        LowerExpression(bin.Right);
+                        _currentBlock!.Emit(new IrCallMethod(leftTypeName, dunderName, 1, expr.Span));
+                        break;
+                    }
+                    // __ne__ fallback: use __eq__ + not if __ne__ doesn't exist
+                    if (binOp == IrBinaryOpKind.NotEqual && leftTypeName is not null &&
+                        _typeDefs.TryGetValue(leftTypeName, out var neTypeDef) &&
+                        neTypeDef.Methods.Any(m => m.Name == "__eq__"))
+                    {
+                        LowerExpression(bin.Left);
+                        LowerExpression(bin.Right);
+                        _currentBlock!.Emit(new IrCallMethod(leftTypeName, "__eq__", 1, expr.Span));
+                        _currentBlock.Emit(new IrUnaryOp(IrUnaryOpKind.LogicalNot, expr.Span));
+                        break;
+                    }
+                }
+
                 var isArithmetic = binOp is IrBinaryOpKind.Add or IrBinaryOpKind.Sub or IrBinaryOpKind.Mul
                     or IrBinaryOpKind.Div or IrBinaryOpKind.IntDiv or IrBinaryOpKind.Mod or IrBinaryOpKind.Pow;
 
@@ -1711,11 +1720,24 @@ public sealed class IrLowering
             }
 
             case UnaryExpr unary:
+            {
+                var unaryDunder = UnaryOpToDunder(unary.Op);
+                var operandType = _typeChecker.ResolvedTypes.TryGetValue(unary.Operand, out var uot) ? uot : null;
+                var operandTypeName = operandType?.DisplayName;
+                if (unaryDunder is not null && operandTypeName is not null &&
+                    _typeDefs.TryGetValue(operandTypeName, out var uTypeDef) &&
+                    uTypeDef.Methods.Any(m => m.Name == unaryDunder))
+                {
+                    LowerExpression(unary.Operand);
+                    _currentBlock!.Emit(new IrCallMethod(operandTypeName, unaryDunder, 0, expr.Span));
+                    break;
+                }
                 LowerExpression(unary.Operand);
                 if (unary.Op == Lexer.TokenKind.KwNot)
                     EmitTruthinessIfNeeded(unary.Operand);
-                _currentBlock.Emit(new IrUnaryOp(MapUnaryOp(unary.Op), expr.Span));
+                _currentBlock!.Emit(new IrUnaryOp(MapUnaryOp(unary.Op), expr.Span));
                 break;
+            }
 
             case CallExpr call:
                 LowerCall(call);
@@ -1883,6 +1905,14 @@ public sealed class IrLowering
 
             case DictComprehension dictComp:
                 LowerDictComprehension(dictComp);
+                break;
+
+            case SetComprehension setComp:
+                LowerSetComprehension(setComp);
+                break;
+
+            case GeneratorExpr genExpr:
+                LowerGeneratorExpr(genExpr);
                 break;
 
             case TypeCastExpr cast:
@@ -2152,6 +2182,22 @@ public sealed class IrLowering
                 return;
             }
 
+            // cast(expr, Type) → TypeCastExpr lowering
+            if (ident.Name == "cast" && call.Arguments.Count == 2)
+            {
+                LowerExpression(call.Arguments[0].Value);
+                // Second argument should be a type name identifier
+                var typeArg = call.Arguments[1].Value;
+                var castTypeName = typeArg switch
+                {
+                    IdentifierExpr typeId => typeId.Name,
+                    MemberAccessExpr ma => $"{ExtractExprName(ma.Object)}.{ma.Member}",
+                    _ => "object",
+                };
+                _currentBlock.Emit(new IrCastClass(castTypeName, call.Span));
+                return;
+            }
+
             var builtins = new HashSet<string>
             {
                 "len", "range", "int", "float", "str", "bool",
@@ -2159,6 +2205,7 @@ public sealed class IrLowering
                 "enumerate", "zip", "map", "filter", "open",
                 "input", "round", "chr", "ord",
                 "all", "any", "sum", "list", "dict", "set", "hash", "reversed",
+                "hex", "bin", "oct", "divmod", "pow", "repr", "format", "tuple",
                 "assert_equal", "assert_not_equal",
             };
 
@@ -2409,9 +2456,26 @@ public sealed class IrLowering
                     break;
                 case FStringInterpolation interp:
                     LowerExpression(interp.Expr);
-                    var exprType = _typeChecker.ResolvedTypes.TryGetValue(interp.Expr, out var et)
-                        ? et : PrimitiveType.Object;
-                    _currentBlock.Emit(new IrToString(exprType, fstr.Span));
+                    if (interp.FormatSpec is not null)
+                    {
+                        // Box value type for String.Format(string, object)
+                        var fmtExprType = _typeChecker.ResolvedTypes.TryGetValue(interp.Expr, out var fet)
+                            ? fet : PrimitiveType.Object;
+                        if (fmtExprType is PrimitiveType fpt && fpt.ClrType is not null && fpt.ClrType.IsValueType)
+                            _currentBlock.Emit(new IrBox(fpt, fstr.Span));
+                        // Save value, push format string, push value — String.Format(fmt, obj)
+                        var fmtTmp = CreateLocal("<fmt_val>", PrimitiveType.Object);
+                        _currentBlock.Emit(new IrStoreLocal(fmtTmp.Index, fstr.Span));
+                        _currentBlock.Emit(new IrLoadString($"{{0:{interp.FormatSpec}}}", fstr.Span));
+                        _currentBlock.Emit(new IrLoadLocal(fmtTmp.Index, fstr.Span));
+                        _currentBlock.Emit(new IrCallDotNetStatic(typeof(string), "Format", 2, fstr.Span));
+                    }
+                    else
+                    {
+                        var exprType = _typeChecker.ResolvedTypes.TryGetValue(interp.Expr, out var et)
+                            ? et : PrimitiveType.Object;
+                        _currentBlock.Emit(new IrToString(exprType, fstr.Span));
+                    }
                     break;
             }
         }
@@ -2451,56 +2515,18 @@ public sealed class IrLowering
     {
         if (_currentBlock is null || _currentFunction is null) return;
 
-        // Desugar: [expr for x in iterable if cond]
-        // → list = new List(); for x in iterable: if cond: list.Add(expr)
+        // Desugar: [expr for x in iter1 if cond1 for y in iter2 if cond2 ...]
+        // → list = new List(); nested loops with innermost adding element
         var listLocal = CreateLocal("<comp_list>", PrimitiveType.Object);
         _currentBlock.Emit(new IrNewObj("System.Collections.Generic.List`1", 0, comp.Span));
         _currentBlock.Emit(new IrStoreLocal(listLocal.Index, comp.Span));
 
-        // Emit iteration (simplified)
-        LowerExpression(comp.Iterable);
-        var enumeratorLocal = CreateLocal("<comp_enum>", PrimitiveType.Object);
-        _currentBlock.Emit(new IrCallVirtual("GetEnumerator", 0, comp.Span));
-        _currentBlock.Emit(new IrStoreLocal(enumeratorLocal.Index, comp.Span));
-
-        var condLabel = NewBlockLabel("comp_cond");
-        var bodyLabel = NewBlockLabel("comp_body");
-        var endLabel = NewBlockLabel("comp_end");
-
-        _currentBlock.Emit(new IrBranch(condLabel, comp.Span));
-
-        var condBlock = new IrBasicBlock { Label = condLabel };
-        _currentFunction.Body.Add(condBlock);
-        _currentBlock = condBlock;
-        _currentBlock.Emit(new IrLoadLocal(enumeratorLocal.Index, comp.Span));
-        _currentBlock.Emit(new IrCallVirtual("MoveNext", 0, comp.Span));
-        _currentBlock.Emit(new IrBranchIf(bodyLabel, endLabel, comp.Span));
-
-        var bodyBlock = new IrBasicBlock { Label = bodyLabel };
-        _currentFunction.Body.Add(bodyBlock);
-        _currentBlock = bodyBlock;
-
-        var varLocal = GetOrCreateLocal(comp.Variable, comp.Span);
-        _currentBlock.Emit(new IrLoadLocal(enumeratorLocal.Index, comp.Span));
-        _currentBlock.Emit(new IrCallVirtual("get_Current", 0, comp.Span));
-        _currentBlock.Emit(new IrStoreLocal(varLocal.Index, comp.Span));
-
-        // Condition filter
-        if (comp.Condition is not null)
+        var endLabel = EmitComprehensionClauses(comp.Clauses, comp.Span, () =>
         {
-            var addLabel = NewBlockLabel("comp_add");
-            LowerExpression(comp.Condition);
-            _currentBlock.Emit(new IrBranchIf(addLabel, condLabel, comp.Span));
-            var addBlock = new IrBasicBlock { Label = addLabel };
-            _currentFunction.Body.Add(addBlock);
-            _currentBlock = addBlock;
-        }
-
-        // Add element
-        _currentBlock.Emit(new IrLoadLocal(listLocal.Index, comp.Span));
-        LowerExpression(comp.Element);
-        _currentBlock.Emit(new IrCallVirtual("Add", 1, comp.Span));
-        _currentBlock.Emit(new IrBranch(condLabel, comp.Span));
+            _currentBlock!.Emit(new IrLoadLocal(listLocal.Index, comp.Span));
+            LowerExpression(comp.Element);
+            _currentBlock.Emit(new IrCallVirtual("Add", 1, comp.Span));
+        });
 
         var endBlock = new IrBasicBlock { Label = endLabel };
         _currentFunction.Body.Add(endBlock);
@@ -2558,63 +2584,159 @@ public sealed class IrLowering
     {
         if (_currentBlock is null || _currentFunction is null) return;
 
-        // Desugar: {kExpr: vExpr for x in iterable if cond}
-        // → dict = new Dictionary(); for x in iterable: if cond: dict.Add(kExpr, vExpr)
+        // Desugar: {kExpr: vExpr for x in iterable if cond ...}
+        // → dict = new Dictionary(); nested loops with innermost adding entry
         var dictLocal = CreateLocal("<dictcomp>", PrimitiveType.Object);
         _currentBlock.Emit(new IrNewObj("System.Collections.Generic.Dictionary`2", 0, dictComp.Span));
         _currentBlock.Emit(new IrStoreLocal(dictLocal.Index, dictComp.Span));
 
-        // Emit iteration
-        LowerExpression(dictComp.Iterable);
-        var enumeratorLocal = CreateLocal("<dictcomp_enum>", PrimitiveType.Object);
-        _currentBlock.Emit(new IrCallVirtual("GetEnumerator", 0, dictComp.Span));
-        _currentBlock.Emit(new IrStoreLocal(enumeratorLocal.Index, dictComp.Span));
-
-        var condLabel = NewBlockLabel("dictcomp_cond");
-        var bodyLabel = NewBlockLabel("dictcomp_body");
-        var endLabel = NewBlockLabel("dictcomp_end");
-
-        _currentBlock.Emit(new IrBranch(condLabel, dictComp.Span));
-
-        var condBlock = new IrBasicBlock { Label = condLabel };
-        _currentFunction.Body.Add(condBlock);
-        _currentBlock = condBlock;
-        _currentBlock.Emit(new IrLoadLocal(enumeratorLocal.Index, dictComp.Span));
-        _currentBlock.Emit(new IrCallVirtual("MoveNext", 0, dictComp.Span));
-        _currentBlock.Emit(new IrBranchIf(bodyLabel, endLabel, dictComp.Span));
-
-        var bodyBlock = new IrBasicBlock { Label = bodyLabel };
-        _currentFunction.Body.Add(bodyBlock);
-        _currentBlock = bodyBlock;
-
-        var varLocal = GetOrCreateLocal(dictComp.Variable, dictComp.Span);
-        _currentBlock.Emit(new IrLoadLocal(enumeratorLocal.Index, dictComp.Span));
-        _currentBlock.Emit(new IrCallVirtual("get_Current", 0, dictComp.Span));
-        _currentBlock.Emit(new IrStoreLocal(varLocal.Index, dictComp.Span));
-
-        // Condition filter
-        if (dictComp.Condition is not null)
+        var endLabel = EmitComprehensionClauses(dictComp.Clauses, dictComp.Span, () =>
         {
-            var addLabel = NewBlockLabel("dictcomp_add");
-            LowerExpression(dictComp.Condition);
-            _currentBlock.Emit(new IrBranchIf(addLabel, condLabel, dictComp.Span));
-            var addBlock = new IrBasicBlock { Label = addLabel };
-            _currentFunction.Body.Add(addBlock);
-            _currentBlock = addBlock;
-        }
-
-        // Add entry: dict.Add(key, value)
-        _currentBlock.Emit(new IrLoadLocal(dictLocal.Index, dictComp.Span));
-        LowerExpression(dictComp.Key);
-        LowerExpression(dictComp.Value);
-        _currentBlock.Emit(new IrCallVirtual("Add", 2, dictComp.Span));
-        _currentBlock.Emit(new IrBranch(condLabel, dictComp.Span));
+            _currentBlock!.Emit(new IrLoadLocal(dictLocal.Index, dictComp.Span));
+            LowerExpression(dictComp.Key);
+            LowerExpression(dictComp.Value);
+            _currentBlock.Emit(new IrCallVirtual("Add", 2, dictComp.Span));
+        });
 
         var endBlock = new IrBasicBlock { Label = endLabel };
         _currentFunction.Body.Add(endBlock);
         _currentBlock = endBlock;
 
         _currentBlock.Emit(new IrLoadLocal(dictLocal.Index, dictComp.Span));
+    }
+
+    private void LowerSetComprehension(SetComprehension setComp)
+    {
+        if (_currentBlock is null || _currentFunction is null) return;
+
+        // Desugar: {expr for x in iterable if cond ...}
+        // → s = new HashSet(); nested loops with innermost adding element
+        var setLocal = CreateLocal("<setcomp>", PrimitiveType.Object);
+        _currentBlock.Emit(new IrNewObj("System.Collections.Generic.HashSet`1", 0, setComp.Span));
+        _currentBlock.Emit(new IrStoreLocal(setLocal.Index, setComp.Span));
+
+        var endLabel = EmitComprehensionClauses(setComp.Clauses, setComp.Span, () =>
+        {
+            _currentBlock!.Emit(new IrLoadLocal(setLocal.Index, setComp.Span));
+            LowerExpression(setComp.Element);
+            // Box value types for HashSet<object>.Add(object)
+            var elemType = _typeChecker.ResolvedTypes.TryGetValue(setComp.Element, out var et) ? et : null;
+            if (elemType is PrimitiveType pt && pt.ClrType is not null && pt.ClrType.IsValueType)
+                _currentBlock.Emit(new IrBox(pt, setComp.Span));
+            _currentBlock.Emit(new IrCallVirtual("Add", 1, setComp.Span));
+            _currentBlock.Emit(new IrPop(setComp.Span)); // discard bool from HashSet.Add
+        });
+
+        var endBlock = new IrBasicBlock { Label = endLabel };
+        _currentFunction.Body.Add(endBlock);
+        _currentBlock = endBlock;
+
+        _currentBlock.Emit(new IrLoadLocal(setLocal.Index, setComp.Span));
+    }
+
+    private void LowerGeneratorExpr(GeneratorExpr genExpr)
+    {
+        if (_currentBlock is null || _currentFunction is null) return;
+
+        // Desugar generator expression to eager List<object> (same as list comprehension).
+        // True lazy IEnumerable<T> generation is a future optimization.
+        var listLocal = CreateLocal("<genexpr>", PrimitiveType.Object);
+        _currentBlock.Emit(new IrNewObj("System.Collections.Generic.List`1", 0, genExpr.Span));
+        _currentBlock.Emit(new IrStoreLocal(listLocal.Index, genExpr.Span));
+
+        var endLabel = EmitComprehensionClauses(genExpr.Clauses, genExpr.Span, () =>
+        {
+            _currentBlock!.Emit(new IrLoadLocal(listLocal.Index, genExpr.Span));
+            LowerExpression(genExpr.Element);
+            _currentBlock.Emit(new IrCallVirtual("Add", 1, genExpr.Span));
+        });
+
+        var endBlock = new IrBasicBlock { Label = endLabel };
+        _currentFunction.Body.Add(endBlock);
+        _currentBlock = endBlock;
+
+        _currentBlock.Emit(new IrLoadLocal(listLocal.Index, genExpr.Span));
+    }
+
+    /// <summary>
+    /// Emits nested iteration loops for comprehension clauses.
+    /// Each clause becomes a GetEnumerator/MoveNext loop, with subsequent clauses nested inside.
+    /// The innermost body invokes <paramref name="emitBody"/> to add the element.
+    /// Returns the end label that the caller should use to create the final end block.
+    /// </summary>
+    private string EmitComprehensionClauses(List<ComprehensionClause> clauses, SourceSpan span, Action emitBody)
+    {
+        // Track the condition labels for each clause level so the innermost body branches back
+        // to the innermost clause's condition, and each clause end branches back to its own condition.
+        var condLabels = new List<string>();
+        var endLabels = new List<string>();
+
+        // Open each clause level
+        for (int i = 0; i < clauses.Count; i++)
+        {
+            var clause = clauses[i];
+
+            LowerExpression(clause.Iterable);
+            var enumeratorLocal = CreateLocal($"<comp_enum_{i}>", PrimitiveType.Object);
+            _currentBlock!.Emit(new IrCallVirtual("GetEnumerator", 0, span));
+            _currentBlock.Emit(new IrStoreLocal(enumeratorLocal.Index, span));
+
+            var condLabel = NewBlockLabel($"comp_cond_{i}");
+            var bodyLabel = NewBlockLabel($"comp_body_{i}");
+            var endLabel = NewBlockLabel($"comp_end_{i}");
+            condLabels.Add(condLabel);
+            endLabels.Add(endLabel);
+
+            _currentBlock.Emit(new IrBranch(condLabel, span));
+
+            var condBlock = new IrBasicBlock { Label = condLabel };
+            _currentFunction!.Body.Add(condBlock);
+            _currentBlock = condBlock;
+            _currentBlock.Emit(new IrLoadLocal(enumeratorLocal.Index, span));
+            _currentBlock.Emit(new IrCallVirtual("MoveNext", 0, span));
+            _currentBlock.Emit(new IrBranchIf(bodyLabel, endLabel, span));
+
+            var bodyBlock = new IrBasicBlock { Label = bodyLabel };
+            _currentFunction.Body.Add(bodyBlock);
+            _currentBlock = bodyBlock;
+
+            var varLocal = GetOrCreateLocal(clause.Variable, span);
+            _currentBlock.Emit(new IrLoadLocal(enumeratorLocal.Index, span));
+            _currentBlock.Emit(new IrCallVirtual("get_Current", 0, span));
+            _currentBlock.Emit(new IrStoreLocal(varLocal.Index, span));
+
+            // Condition filter: if condition fails, branch back to this clause's condition
+            if (clause.Condition is not null)
+            {
+                var filterPassLabel = NewBlockLabel($"comp_pass_{i}");
+                LowerExpression(clause.Condition);
+                _currentBlock.Emit(new IrBranchIf(filterPassLabel, condLabel, span));
+                var filterPassBlock = new IrBasicBlock { Label = filterPassLabel };
+                _currentFunction.Body.Add(filterPassBlock);
+                _currentBlock = filterPassBlock;
+            }
+        }
+
+        // Emit the innermost body (add element)
+        emitBody();
+
+        // Branch back to the innermost clause's condition
+        _currentBlock!.Emit(new IrBranch(condLabels[^1], span));
+
+        // Close inner clause levels in reverse order: each end block branches back to outer condition
+        // Skip the outermost (i=0) — the caller creates that end block.
+        for (int i = clauses.Count - 1; i >= 1; i--)
+        {
+            var endBlock = new IrBasicBlock { Label = endLabels[i] };
+            _currentFunction!.Body.Add(endBlock);
+            _currentBlock = endBlock;
+
+            // Branch back to the outer clause's condition
+            _currentBlock.Emit(new IrBranch(condLabels[i - 1], span));
+        }
+
+        // Return the outermost end label — caller creates the final end block
+        return endLabels[0];
     }
 
     private void LowerWithStatement(WithStatement withStmt)
@@ -2674,27 +2796,143 @@ public sealed class IrLowering
         var tupleLocal = CreateLocal("<unpack_tuple>", PrimitiveType.Object);
         _currentBlock.Emit(new IrStoreLocal(tupleLocal.Index, assign.Span));
 
-        for (int i = 0; i < tupleTarget.Elements.Count; i++)
+        // Check for starred unpacking: a, *rest, b = items
+        var starredIndex = -1;
+        for (int si = 0; si < tupleTarget.Elements.Count; si++)
+            if (tupleTarget.Elements[si] is StarredExpr) { starredIndex = si; break; }
+
+        if (starredIndex >= 0)
         {
+            // Convert source to object[] for uniform indexing.
+            // Emit: Enumerable.ToArray(Enumerable.Cast<object>((IEnumerable)value))
+            // This handles both List<object> and object[] inputs.
             _currentBlock.Emit(new IrLoadLocal(tupleLocal.Index, assign.Span));
-            _currentBlock.Emit(new IrTupleElement(i, assign.Span));
+            _currentBlock.Emit(new IrCallDotNetGenericStatic(
+                typeof(Enumerable), "Cast", 1, [typeof(object)], assign.Span));
+            _currentBlock.Emit(new IrCallDotNetGenericStatic(
+                typeof(Enumerable), "ToArray", 1, [typeof(object)], assign.Span));
+            _currentBlock.Emit(new IrStoreLocal(tupleLocal.Index, assign.Span));
 
-            // Determine the element type for proper local typing
-            var elemType = (tupleElemTypes is not null && i < tupleElemTypes.Length)
-                ? tupleElemTypes[i]
-                : (CulebralType)PrimitiveType.Object;
+            // Starred unpacking: head elements by index, starred gets slice, tail from end
+            var headCount = starredIndex;
+            var tailCount = tupleTarget.Elements.Count - starredIndex - 1;
 
-            if (tupleTarget.Elements[i] is IdentifierExpr targetIdent)
+            // Head elements: items[0], items[1], ...
+            for (int hi = 0; hi < headCount; hi++)
             {
-                var local = GetOrCreateLocal(targetIdent.Name, assign.Span, elemType);
-                // Unbox value types since tuple elements are stored as object in the array
-                if (elemType is PrimitiveType upt && upt.ClrType is not null && upt.ClrType.IsValueType)
-                    _currentBlock.Emit(new IrUnbox(upt, assign.Span));
-                _currentBlock.Emit(new IrStoreLocal(local.Index, assign.Span));
+                _currentBlock.Emit(new IrLoadLocal(tupleLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrTupleElement(hi, assign.Span));
+                if (tupleTarget.Elements[hi] is IdentifierExpr headId)
+                {
+                    var local = GetOrCreateLocal(headId.Name, assign.Span);
+                    _currentBlock.Emit(new IrStoreLocal(local.Index, assign.Span));
+                }
+                else _currentBlock.Emit(new IrPop(assign.Span));
             }
-            else
+
+            // Starred element: items[headCount .. len-tailCount]
+            // This is a List<object> created by GetRange or similar
+            // For now, store as a list using IrSlice or manual construction
+            var starred = (StarredExpr)tupleTarget.Elements[starredIndex];
+            if (starred.Operand is IdentifierExpr starId)
             {
-                _currentBlock.Emit(new IrPop(assign.Span));
+                // Emit: new List<object>()
+                _currentBlock.Emit(new IrNewObj("System.Collections.Generic.List`1", 0, assign.Span));
+                var starListLocal = GetOrCreateLocal(starId.Name, assign.Span);
+                _currentBlock.Emit(new IrStoreLocal(starListLocal.Index, assign.Span));
+
+                // Add elements from headCount to len-tailCount
+                // Get array length via System.Array.Length property
+                var lenLocal = CreateLocal("<star_len>", PrimitiveType.Int);
+                _currentBlock.Emit(new IrLoadLocal(tupleLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrCallDotNetInstance(typeof(Array), "get_Length", 0, assign.Span));
+                _currentBlock.Emit(new IrStoreLocal(lenLocal.Index, assign.Span));
+
+                // for (idx = headCount; idx < len - tailCount; idx++) starList.Add(tuple[idx])
+                var idxLocal = CreateLocal("<star_idx>", PrimitiveType.Int);
+                _currentBlock.Emit(new IrLoadInt(headCount, assign.Span));
+                _currentBlock.Emit(new IrStoreLocal(idxLocal.Index, assign.Span));
+
+                var starCond = NewBlockLabel("star_cond");
+                var starBody = NewBlockLabel("star_body");
+                var starEnd = NewBlockLabel("star_end");
+                _currentBlock.Emit(new IrBranch(starCond, assign.Span));
+
+                var starCondBlock = new IrBasicBlock { Label = starCond };
+                _currentFunction.Body.Add(starCondBlock);
+                _currentBlock = starCondBlock;
+                _currentBlock.Emit(new IrLoadLocal(idxLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrLoadLocal(lenLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrLoadInt(tailCount, assign.Span));
+                _currentBlock.Emit(new IrBinaryOp(IrBinaryOpKind.Sub, PrimitiveType.Int, assign.Span));
+                _currentBlock.Emit(new IrBinaryOp(IrBinaryOpKind.LessThan, null, assign.Span));
+                _currentBlock.Emit(new IrBranchIf(starBody, starEnd, assign.Span));
+
+                var starBodyBlock = new IrBasicBlock { Label = starBody };
+                _currentFunction.Body.Add(starBodyBlock);
+                _currentBlock = starBodyBlock;
+                _currentBlock.Emit(new IrLoadLocal(starListLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrLoadLocal(tupleLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrLoadLocal(idxLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrLoadElement(assign.Span));
+                _currentBlock.Emit(new IrCallVirtual("Add", 1, assign.Span));
+                // Increment idx
+                _currentBlock.Emit(new IrLoadLocal(idxLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrLoadInt(1, assign.Span));
+                _currentBlock.Emit(new IrBinaryOp(IrBinaryOpKind.Add, PrimitiveType.Int, assign.Span));
+                _currentBlock.Emit(new IrStoreLocal(idxLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrBranch(starCond, assign.Span));
+
+                var starEndBlock = new IrBasicBlock { Label = starEnd };
+                _currentFunction.Body.Add(starEndBlock);
+                _currentBlock = starEndBlock;
+            }
+
+            // Tail elements: items[len-tailCount], items[len-tailCount+1], ...
+            for (int ti = 0; ti < tailCount; ti++)
+            {
+                var targetIdx = starredIndex + 1 + ti;
+                // Index from end: len - tailCount + ti
+                _currentBlock.Emit(new IrLoadLocal(tupleLocal.Index, assign.Span));
+                // We need dynamic indexing: compute len - tailCount + ti
+                _currentBlock.Emit(new IrLoadLocal(tupleLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrCallDotNetInstance(typeof(Array), "get_Length", 0, assign.Span));
+                _currentBlock.Emit(new IrLoadInt(tailCount - ti, assign.Span));
+                _currentBlock.Emit(new IrBinaryOp(IrBinaryOpKind.Sub, PrimitiveType.Int, assign.Span));
+                _currentBlock.Emit(new IrLoadElement(assign.Span));
+                if (tupleTarget.Elements[targetIdx] is IdentifierExpr tailId)
+                {
+                    var local = GetOrCreateLocal(tailId.Name, assign.Span);
+                    _currentBlock.Emit(new IrStoreLocal(local.Index, assign.Span));
+                }
+                else _currentBlock.Emit(new IrPop(assign.Span));
+            }
+        }
+        else
+        {
+            // Standard fixed-count unpacking (existing logic)
+            for (int i = 0; i < tupleTarget.Elements.Count; i++)
+            {
+                _currentBlock.Emit(new IrLoadLocal(tupleLocal.Index, assign.Span));
+                _currentBlock.Emit(new IrTupleElement(i, assign.Span));
+
+                // Determine the element type for proper local typing
+                var elemType = (tupleElemTypes is not null && i < tupleElemTypes.Length)
+                    ? tupleElemTypes[i]
+                    : (CulebralType)PrimitiveType.Object;
+
+                if (tupleTarget.Elements[i] is IdentifierExpr targetIdent)
+                {
+                    var local = GetOrCreateLocal(targetIdent.Name, assign.Span, elemType);
+                    // Unbox value types since tuple elements are stored as object in the array
+                    if (elemType is PrimitiveType upt && upt.ClrType is not null && upt.ClrType.IsValueType)
+                        _currentBlock.Emit(new IrUnbox(upt, assign.Span));
+                    _currentBlock.Emit(new IrStoreLocal(local.Index, assign.Span));
+                }
+                else
+                {
+                    _currentBlock.Emit(new IrPop(assign.Span));
+                }
             }
         }
     }
@@ -2896,6 +3134,50 @@ public sealed class IrLowering
                     _currentBlock.Emit(new IrIsNull(false, matchCase.Span));
                     _currentBlock.Emit(new IrBranchIf(caseBodyLabel, nextCaseLabel, matchCase.Span));
                     break;
+
+                case OrPattern orPat:
+                {
+                    // Try each alternative: if any matches, go to body
+                    for (int ai = 0; ai < orPat.Alternatives.Count; ai++)
+                    {
+                        var alt = orPat.Alternatives[ai];
+                        var nextAltLabel = ai < orPat.Alternatives.Count - 1
+                            ? NewBlockLabel($"case_{i}_or_{ai + 1}")
+                            : nextCaseLabel;
+
+                        if (alt is LiteralPattern altLit)
+                        {
+                            _currentBlock!.Emit(new IrLoadLocal(subjectLocal.Index, matchCase.Span));
+                            if (altLit.Literal is IntLiteralExpr)
+                                _currentBlock.Emit(new IrUnbox(PrimitiveType.Int, matchCase.Span));
+                            LowerExpression(altLit.Literal);
+                            _currentBlock.Emit(new IrBinaryOp(IrBinaryOpKind.Equal, null, matchCase.Span));
+                            _currentBlock.Emit(new IrBranchIf(caseBodyLabel, nextAltLabel, matchCase.Span));
+                        }
+                        else if (alt is NonePattern)
+                        {
+                            _currentBlock!.Emit(new IrLoadLocal(subjectLocal.Index, matchCase.Span));
+                            _currentBlock.Emit(new IrIsNull(false, matchCase.Span));
+                            _currentBlock.Emit(new IrBranchIf(caseBodyLabel, nextAltLabel, matchCase.Span));
+                        }
+                        else if (alt is WildcardPattern)
+                        {
+                            _currentBlock!.Emit(new IrBranch(caseBodyLabel, matchCase.Span));
+                        }
+                        else
+                        {
+                            _currentBlock!.Emit(new IrBranch(nextAltLabel, matchCase.Span));
+                        }
+
+                        if (ai < orPat.Alternatives.Count - 1)
+                        {
+                            var nextAltBlock = new IrBasicBlock { Label = nextAltLabel };
+                            _currentFunction!.Body.Add(nextAltBlock);
+                            _currentBlock = nextAltBlock;
+                        }
+                    }
+                    break;
+                }
 
                 default:
                     // Unsupported pattern — skip to next
@@ -3150,6 +3432,65 @@ public sealed class IrLowering
         return local;
     }
 
+    /// <summary>
+    /// Extract decorator metadata from AST Decorator nodes into IR IrDecorator objects,
+    /// preserving both the name and any constant arguments for .NET attribute emission.
+    /// </summary>
+    private static List<IrDecorator>? ExtractDecorators(List<Decorator> decorators)
+    {
+        if (decorators.Count == 0)
+            return null;
+
+        var result = new List<IrDecorator>();
+        foreach (var d in decorators)
+        {
+            var (name, args) = d.Expr switch
+            {
+                IdentifierExpr id => (id.Name, new List<object?>()),
+                CallExpr { Callee: IdentifierExpr callId, Arguments: var callArgs } =>
+                    (callId.Name, ExtractConstantArgs(callArgs)),
+                MemberAccessExpr ma => ($"{ExtractExprName(ma.Object)}.{ma.Member}", new List<object?>()),
+                CallExpr { Callee: MemberAccessExpr ma, Arguments: var callArgs } =>
+                    ($"{ExtractExprName(ma.Object)}.{ma.Member}", ExtractConstantArgs(callArgs)),
+                _ => ((string?)null, new List<object?>()),
+            };
+
+            if (name is not null)
+                result.Add(new IrDecorator { Name = name, Arguments = args });
+        }
+
+        return result.Count > 0 ? result : null;
+    }
+
+    private static string ExtractExprName(Expression expr)
+    {
+        return expr switch
+        {
+            IdentifierExpr id => id.Name,
+            MemberAccessExpr ma => $"{ExtractExprName(ma.Object)}.{ma.Member}",
+            _ => "unknown",
+        };
+    }
+
+    private static List<object?> ExtractConstantArgs(List<Argument> args)
+    {
+        var result = new List<object?>();
+        foreach (var arg in args)
+        {
+            var value = arg.Value switch
+            {
+                StringLiteralExpr s => (object?)s.Value,
+                IntLiteralExpr i => i.Value,
+                FloatLiteralExpr f => f.Value,
+                BoolLiteralExpr b => b.Value,
+                NoneLiteralExpr => null,
+                _ => null, // Non-constant args — emit as null (best effort)
+            };
+            result.Add(value);
+        }
+        return result;
+    }
+
     private string NewBlockLabel(string prefix) => $"{prefix}_{_blockCounter++}";
 
     private static bool EndsWithReturn(IrBasicBlock block)
@@ -3320,6 +3661,36 @@ public sealed class IrLowering
         TokenKind.Tilde => IrUnaryOpKind.BitNot,
         TokenKind.KwNot => IrUnaryOpKind.LogicalNot,
         _ => IrUnaryOpKind.Negate,
+    };
+
+    private static string? BinaryOpToDunder(IrBinaryOpKind op) => op switch
+    {
+        IrBinaryOpKind.Add => "__add__",
+        IrBinaryOpKind.Sub => "__sub__",
+        IrBinaryOpKind.Mul => "__mul__",
+        IrBinaryOpKind.Div => "__truediv__",
+        IrBinaryOpKind.IntDiv => "__floordiv__",
+        IrBinaryOpKind.Mod => "__mod__",
+        IrBinaryOpKind.Pow => "__pow__",
+        IrBinaryOpKind.Equal => "__eq__",
+        IrBinaryOpKind.NotEqual => "__ne__",
+        IrBinaryOpKind.LessThan => "__lt__",
+        IrBinaryOpKind.LessEqual => "__le__",
+        IrBinaryOpKind.GreaterThan => "__gt__",
+        IrBinaryOpKind.GreaterEqual => "__ge__",
+        IrBinaryOpKind.BitAnd => "__and__",
+        IrBinaryOpKind.BitOr => "__or__",
+        IrBinaryOpKind.BitXor => "__xor__",
+        IrBinaryOpKind.ShiftLeft => "__lshift__",
+        IrBinaryOpKind.ShiftRight => "__rshift__",
+        _ => null,
+    };
+
+    private static string? UnaryOpToDunder(TokenKind op) => op switch
+    {
+        TokenKind.Minus => "__neg__",
+        TokenKind.Tilde => "__invert__",
+        _ => null,
     };
 
     // ─── .NET Import Processing ───

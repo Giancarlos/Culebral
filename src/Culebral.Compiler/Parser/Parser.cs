@@ -201,7 +201,7 @@ public sealed class CulebralParser
 
     // ─── Class Definition ───
 
-    private ClassDef ParseClassDef()
+    private ClassDef ParseClassDef(List<Decorator>? decorators = null)
     {
         var start = Current.Span.Start;
         Advance(); // consume 'class'
@@ -225,7 +225,7 @@ public sealed class CulebralParser
         var members = ParseClassBody();
         var end = members.Count > 0 ? members[^1].Span.End : CurrentLocation();
 
-        return new ClassDef(name, typeParams, bases, members, new SourceSpan(start, end));
+        return new ClassDef(name, typeParams, bases, members, decorators ?? [], new SourceSpan(start, end));
     }
 
     private StructDef ParseStructDef()
@@ -428,8 +428,23 @@ public sealed class CulebralParser
     /// </summary>
     private bool IsDecoratorContext()
     {
-        // Look ahead past newlines to see if we reach def/class/async/@/@identifier
+        // Look ahead past newlines (and optional argument list) to see if we reach
+        // def/class/async/@/@identifier
         var lookahead = _pos + 1;
+
+        // Skip past decorator arguments: @Route("/api") → skip (...) block
+        if (lookahead < _tokens.Count && _tokens[lookahead].Kind == TokenKind.LeftParen)
+        {
+            var depth = 1;
+            lookahead++;
+            while (lookahead < _tokens.Count && depth > 0)
+            {
+                if (_tokens[lookahead].Kind == TokenKind.LeftParen) depth++;
+                else if (_tokens[lookahead].Kind == TokenKind.RightParen) depth--;
+                lookahead++;
+            }
+        }
+
         while (lookahead < _tokens.Count && _tokens[lookahead].Kind == TokenKind.Newline)
             lookahead++;
         if (lookahead >= _tokens.Count) return false;
@@ -452,9 +467,21 @@ public sealed class CulebralParser
                 var name = Current.Lexeme[1..]; // strip leading '@'
                 var tok = Current;
                 Advance();
-                decorators.Add(new Decorator(
-                    new IdentifierExpr(name, tok.Span),
-                    new SourceSpan(start, tok.Span.End)));
+                Expression decoratorExpr = new IdentifierExpr(name, tok.Span);
+
+                // Check for decorator arguments: @Route("/api")
+                if (Current.Kind == TokenKind.LeftParen)
+                {
+                    Advance(); // consume '('
+                    var args = ParseArgumentList();
+                    var endLoc = CurrentLocation();
+                    Expect(TokenKind.RightParen);
+                    decoratorExpr = new CallExpr(decoratorExpr, args,
+                        new SourceSpan(start, endLoc));
+                }
+
+                decorators.Add(new Decorator(decoratorExpr,
+                    new SourceSpan(start, decoratorExpr.Span.End)));
             }
             else
             {
@@ -487,11 +514,7 @@ public sealed class CulebralParser
             return ParseFunctionDef(isAsync: true, decorators);
         }
         if (Current.Kind == TokenKind.KwClass)
-        {
-            var cls = ParseClassDef();
-            // Attach decorators to class (extend ClassDef if needed)
-            return cls;
-        }
+            return ParseClassDef(decorators);
 
         _diagnostics.Error("LEB1003", "Decorator must be followed by a function or class definition", Current.Span);
         return new PassStatement(Current.Span);
@@ -670,9 +693,14 @@ public sealed class CulebralParser
         var start = Current.Span.Start;
         Advance(); // consume 'raise'
         Expression? value = null;
+        Expression? cause = null;
         if (Current.Kind != TokenKind.Newline && Current.Kind != TokenKind.EndOfFile)
+        {
             value = ParseExpression();
-        return new RaiseStatement(value, new SourceSpan(start, CurrentLocation()));
+            if (TryConsume(TokenKind.KwFrom))
+                cause = ParseExpression();
+        }
+        return new RaiseStatement(value, cause, new SourceSpan(start, CurrentLocation()));
     }
 
     private AssertStatement ParseAssertStatement()
@@ -729,6 +757,15 @@ public sealed class CulebralParser
         var start = Current.Span.Start;
         Expect(TokenKind.KwCase);
         var pattern = ParsePattern();
+
+        // OR patterns: case 1 | 2 | 3:
+        if (Current.Kind == TokenKind.Pipe)
+        {
+            var alternatives = new List<Pattern> { pattern };
+            while (TryConsume(TokenKind.Pipe))
+                alternatives.Add(ParsePattern());
+            pattern = new OrPattern(alternatives, new SourceSpan(start, CurrentLocation()));
+        }
 
         Expression? guard = null;
         if (TryConsume(TokenKind.KwIf))
@@ -922,17 +959,40 @@ public sealed class CulebralParser
     private Statement ParseExpressionOrAssignment()
     {
         var start = Current.Span.Start;
-        var expr = ParseExpression();
+        // Starred expression at start of statement: *rest, ... = ...
+        Expression expr;
+        if (Current.Kind == TokenKind.Star && Peek(1).Kind == TokenKind.Identifier)
+        {
+            var starStart = Current.Span.Start;
+            Advance(); // consume *
+            var operand = ParsePrimary();
+            expr = new StarredExpr(operand, new SourceSpan(starStart, operand.Span.End));
+        }
+        else
+        {
+            expr = ParseExpression();
+        }
 
         // Tuple unpacking: a, b = b, a  /  x, y, z = 10, 20, 30
         // When we see Comma at statement level after the first expression,
         // collect targets into a TupleExpr, then expect '=' and parse RHS as tuple.
-        if (Current.Kind == TokenKind.Comma)
+        // Also check if the FIRST expr should be starred: *rest, ... = ...
+        if (Current.Kind == TokenKind.Comma || expr is StarredExpr)
         {
             var targets = new List<Expression> { expr };
             while (TryConsume(TokenKind.Comma))
             {
-                targets.Add(ParseExpression());
+                if (Current.Kind == TokenKind.Star)
+                {
+                    var starStart = Current.Span.Start;
+                    Advance();
+                    var operand = ParsePrimary();
+                    targets.Add(new StarredExpr(operand, new SourceSpan(starStart, operand.Span.End)));
+                }
+                else
+                {
+                    targets.Add(ParseExpression());
+                }
             }
             var tupleTarget = new TupleExpr(targets,
                 new SourceSpan(targets[0].Span.Start, targets[^1].Span.End));
@@ -1321,9 +1381,19 @@ public sealed class CulebralParser
             }
             else if (Current.Kind == TokenKind.Dot)
             {
-                // Member access
+                // Member access — allow contextual keywords as member names
                 Advance();
-                var member = Expect(TokenKind.Identifier).Lexeme;
+                string member;
+                if (Current.Kind == TokenKind.Identifier || Current.Kind is TokenKind.KwGet or TokenKind.KwSet
+                    or TokenKind.KwType or TokenKind.KwFrom)
+                {
+                    member = Current.Lexeme;
+                    Advance();
+                }
+                else
+                {
+                    member = Expect(TokenKind.Identifier).Lexeme;
+                }
                 expr = new MemberAccessExpr(expr, member, new SourceSpan(expr.Span.Start, CurrentLocation()));
             }
             else
@@ -1375,6 +1445,17 @@ public sealed class CulebralParser
         }
 
         var expr = ParseExpression();
+
+        // Generator expression inside function call: list(x * 2 for x in items)
+        // The function call's parentheses serve as the generator's parentheses.
+        if (Current.Kind == TokenKind.KwFor)
+        {
+            var clauses = ParseComprehensionClauses();
+            var genExpr = new GeneratorExpr(expr, clauses,
+                new SourceSpan(start, CurrentLocation()));
+            return new Argument(null, genExpr, false, new SourceSpan(start, genExpr.Span.End));
+        }
+
         return new Argument(null, expr, false, new SourceSpan(start, expr.Span.End));
     }
 
@@ -1562,19 +1643,12 @@ public sealed class CulebralParser
 
         var first = ParseExpression();
 
-        // List comprehension: [x for x in ...]
+        // List comprehension: [x for x in ... (for y in ... if ...)*]
         if (Current.Kind == TokenKind.KwFor)
         {
-            Advance();
-            var variable = Expect(TokenKind.Identifier).Lexeme;
-            Expect(TokenKind.KwIn);
-            // Parse iterable as or-expression to avoid consuming 'if' as ternary
-            var iterable = ParseOr();
-            Expression? condition = null;
-            if (TryConsume(TokenKind.KwIf))
-                condition = ParseOr(); // Also parse condition without ternary ambiguity
+            var clauses = ParseComprehensionClauses();
             Expect(TokenKind.RightBracket);
-            return new ListComprehension(first, variable, iterable, condition,
+            return new ListComprehension(first, clauses,
                 new SourceSpan(start, CurrentLocation()));
         }
 
@@ -1612,15 +1686,9 @@ public sealed class CulebralParser
             // Dict comprehension
             if (Current.Kind == TokenKind.KwFor)
             {
-                Advance();
-                var variable = Expect(TokenKind.Identifier).Lexeme;
-                Expect(TokenKind.KwIn);
-                var iterable = ParseOr();
-                Expression? condition = null;
-                if (TryConsume(TokenKind.KwIf))
-                    condition = ParseOr();
+                var clauses = ParseComprehensionClauses();
                 Expect(TokenKind.RightBrace);
-                return new DictComprehension(first, firstVal, variable, iterable, condition,
+                return new DictComprehension(first, firstVal, clauses,
                     new SourceSpan(start, CurrentLocation()));
             }
 
@@ -1637,6 +1705,15 @@ public sealed class CulebralParser
             return new DictExpr(entries, new SourceSpan(start, CurrentLocation()));
         }
 
+        // Set comprehension: {expr for var in iterable (if condition)? (for ...)*}
+        if (Current.Kind == TokenKind.KwFor)
+        {
+            var clauses = ParseComprehensionClauses();
+            Expect(TokenKind.RightBrace);
+            return new SetComprehension(first, clauses,
+                new SourceSpan(start, CurrentLocation()));
+        }
+
         // Set: {a, b, c}
         var setElements = new List<Expression> { first };
         while (TryConsume(TokenKind.Comma))
@@ -1650,16 +1727,33 @@ public sealed class CulebralParser
 
     private GeneratorExpr ParseGeneratorExpr(Expression element, SourceLocation start)
     {
-        Advance(); // consume 'for'
-        var variable = Expect(TokenKind.Identifier).Lexeme;
-        Expect(TokenKind.KwIn);
-        var iterable = ParseOr();
-        Expression? condition = null;
-        if (TryConsume(TokenKind.KwIf))
-            condition = ParseOr();
+        var clauses = ParseComprehensionClauses();
         Expect(TokenKind.RightParen);
-        return new GeneratorExpr(element, variable, iterable, condition,
+        return new GeneratorExpr(element, clauses,
             new SourceSpan(start, CurrentLocation()));
+    }
+
+    /// <summary>
+    /// Parses one or more comprehension clauses: for var in iterable [if cond] ...
+    /// Current token must be KwFor on entry.
+    /// </summary>
+    private List<ComprehensionClause> ParseComprehensionClauses()
+    {
+        var clauses = new List<ComprehensionClause>();
+        while (Current.Kind == TokenKind.KwFor)
+        {
+            var clauseStart = Current.Span.Start;
+            Advance(); // consume 'for'
+            var variable = Expect(TokenKind.Identifier).Lexeme;
+            Expect(TokenKind.KwIn);
+            var iterable = ParseOr();
+            Expression? condition = null;
+            if (TryConsume(TokenKind.KwIf))
+                condition = ParseOr();
+            clauses.Add(new ComprehensionClause(variable, iterable, condition,
+                new SourceSpan(clauseStart, CurrentLocation())));
+        }
+        return clauses;
     }
 
     // ─── F-String Parsing ───
@@ -1700,12 +1794,28 @@ public sealed class CulebralParser
                 if (i < raw.Length) i++; // skip '}'
                 textStart = i;
 
+                // Split on ':' for format spec (respect nested braces/brackets/parens)
+                string? formatSpec = null;
+                int fmtDepth = 0;
+                for (int ci = 0; ci < exprText.Length; ci++)
+                {
+                    char c = exprText[ci];
+                    if (c is '(' or '[' or '{') fmtDepth++;
+                    else if (c is ')' or ']' or '}') fmtDepth--;
+                    else if (c == ':' && fmtDepth == 0)
+                    {
+                        formatSpec = exprText[(ci + 1)..];
+                        exprText = exprText[..ci];
+                        break;
+                    }
+                }
+
                 // Parse the expression inside {}
                 var exprLexer = new CulebralLexer(exprText, "<fstring>", _diagnostics);
                 var exprTokens = exprLexer.Tokenize();
                 var exprParser = new CulebralParser(exprTokens, _diagnostics);
                 var expr = exprParser.ParseExpression();
-                parts.Add(new FStringInterpolation(expr, span));
+                parts.Add(new FStringInterpolation(expr, formatSpec, span));
             }
             else
             {
