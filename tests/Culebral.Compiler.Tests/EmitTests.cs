@@ -4484,4 +4484,105 @@ public class EmitTests : IDisposable
         var result = Program.Compile(skvPath, dllPath);
         Assert.DoesNotContain(result.Diagnostics, d => d.Code == "LEB2020");
     }
+
+    // ─── Inheritance and Virtual Dispatch Tests ───
+
+    [Fact]
+    public void Inheritance_MethodOverride()
+    {
+        var output = CompileAndRun("""
+            class Shape:
+                def area() -> int:
+                    return 0
+
+            class Square(Shape):
+                side: int = 0
+                def __init__(s: int):
+                    @side = s
+                def area() -> int:
+                    return int(@side) * int(@side)
+
+            def main():
+                s = Square(5)
+                print(s.area())
+            """);
+        Assert.Equal("25", output);
+    }
+
+    // ─── Edge Case Tests ───
+
+    [Fact]
+    public void FString_TextOnly_NoInterpolation()
+    {
+        var output = CompileAndRun("""
+            def main():
+                s = f"hello world"
+                print(s)
+            """);
+        Assert.Equal("hello world", output);
+    }
+
+    [Fact]
+    public void TryExcept_MultipleTypes_CatchesSecond()
+    {
+        var output = CompileAndRun("""
+            from System import ArgumentException, InvalidOperationException
+
+            def main():
+                try:
+                    raise InvalidOperationException("oops")
+                except (ArgumentException, InvalidOperationException):
+                    print("caught")
+            """);
+        Assert.Equal("caught", output);
+    }
+
+    [Fact]
+    public void Slice_BasicRange()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = [0, 1, 2, 3, 4, 5]
+                sub = items[1:4]
+                print(len(sub))
+            """);
+        Assert.Equal("3", output);
+    }
+
+    [Fact]
+    public void GeneratorExpr_InFunctionCall()
+    {
+        var output = CompileAndRun("""
+            def main():
+                result = list(x for x in range(5))
+                print(len(result))
+            """);
+        Assert.Equal("5", output);
+    }
+
+    [Fact]
+    public void DictComprehension_Basic()
+    {
+        var output = CompileAndRun("""
+            def main():
+                d = {str(x): x for x in range(3)}
+                print(len(d))
+            """);
+        Assert.Equal("3", output);
+    }
+
+    [Fact]
+    public void WithStatement_ResourceCleanup()
+    {
+        // Verify with statement compiles and runs (dispose is called)
+        var output = CompileAndRun("""
+            from System.IO import StringWriter
+
+            def main():
+                with StringWriter() as sw:
+                    sw.write("hello")
+                    print(sw.to_string())
+            """);
+        Assert.Equal("hello", output);
+    }
 }

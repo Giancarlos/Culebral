@@ -3430,7 +3430,10 @@ public sealed class CilEmitter
             }
         }
 
-        // Last resort: pop everything
+        // Last resort: pop everything and push null — method not found
+        _diagnostics.Warning("LEB4004",
+            $"Cannot resolve virtual method '{resolvedName}' with {argc} argument(s) — returning null",
+            SourceSpan.None);
         for (int i = 0; i < argc + 1; i++)
             il.Emit(OpCodes.Pop);
         il.Emit(OpCodes.Ldnull);
@@ -3481,6 +3484,9 @@ public sealed class CilEmitter
         }
         else
         {
+            _diagnostics.Warning("LEB4003",
+                $"Cannot resolve method '{declaringType}.{methodName}' — falling back to virtual dispatch",
+                SourceSpan.None);
             EmitVirtualCall(il, methodName, argc);
         }
     }
