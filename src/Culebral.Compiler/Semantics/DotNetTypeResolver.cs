@@ -99,12 +99,12 @@ public sealed class DotNetTypeResolver
         var flags = BindingFlags.Public | BindingFlags.FlattenHierarchy |
                     (isStatic ? BindingFlags.Static : BindingFlags.Instance);
 
-        // Try PascalCase first (the converted name)
-        var method = FindMethod(type, pascalName, argCount, flags);
+        // Try original name first (exact match — respects unconventional naming)
+        var method = FindMethod(type, culebralName, argCount, flags);
 
-        // Try the original name verbatim (user may have written PascalCase)
+        // Fall back to PascalCase conversion (snake_case → PascalCase bridging)
         if (method is null && culebralName != pascalName)
-            method = FindMethod(type, culebralName, argCount, flags);
+            method = FindMethod(type, pascalName, argCount, flags);
 
         if (method is not null)
             _methodCache[cacheKey] = method;

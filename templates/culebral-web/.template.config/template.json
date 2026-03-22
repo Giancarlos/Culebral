@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "Culebral Contributors",
+  "classifications": [ "Web", "ASP.NET", "Culebral" ],
+  "identity": "Culebral.Templates.Web",
+  "name": "Culebral ASP.NET Web API",
+  "shortName": "culebral-web",
+  "tags": {
+    "language": "Culebral",
+    "type": "project"
+  },
+  "sourceName": "CuleralWeb",
+  "preferNameDirectory": true,
+  "symbols": {
+    "framework": {
+      "type": "parameter",
+      "description": "The target framework for the project.",
+      "datatype": "choice",
+      "choices": [
+        {
+          "choice": "net10.0",
+          "description": "Target .NET 10"
+        },
+        {
+          "choice": "net9.0",
+          "description": "Target .NET 9"
+        }
+      ],
+      "defaultValue": "net10.0",
+      "replaces": "net10.0"
+    },
+    "port": {
+      "type": "parameter",
+      "description": "The port number for the web server.",
+      "datatype": "int",
+      "defaultValue": "5000",
+      "replaces": "5000"
+    }
+  }
+}

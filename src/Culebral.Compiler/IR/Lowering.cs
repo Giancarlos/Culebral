@@ -2306,14 +2306,18 @@ public sealed class IrLowering
         {
             var objType = _typeChecker.ResolvedTypes.TryGetValue(member.Object, out var ot) ? ot : null;
             var resolver = _typeChecker.DotNetResolver;
-            var methodName = DotNetTypeResolver.SnakeToPascal(member.Member);
+            var originalName = member.Member;
+            var methodName = DotNetTypeResolver.SnakeToPascal(originalName);
 
             // .NET static method: File.read_all_text(...) — don't load the type as a value
             if (member.Object is IdentifierExpr objIdent && ResolveDotNetType(objIdent.Name) is Type staticType)
             {
+                // Resolve actual method name (original first, then PascalCase)
+                var staticMethod = resolver.ResolveMethod(staticType, originalName, call.Arguments.Count, isStatic: true);
+                var resolvedStaticName = staticMethod?.Name ?? methodName;
                 foreach (var arg in call.Arguments)
                     LowerExpression(arg.Value);
-                _currentBlock.Emit(new IrCallDotNetStatic(staticType, methodName, call.Arguments.Count, call.Span));
+                _currentBlock.Emit(new IrCallDotNetStatic(staticType, resolvedStaticName, call.Arguments.Count, call.Span));
                 return;
             }
 
@@ -2325,9 +2329,11 @@ public sealed class IrLowering
                 var chainType = ResolveDotNetChain(nsIdent.Name, outerMember.Member);
                 if (chainType is not null)
                 {
+                    var chainMethod = resolver.ResolveMethod(chainType, originalName, call.Arguments.Count, isStatic: true);
+                    var resolvedChainName = chainMethod?.Name ?? methodName;
                     foreach (var arg in call.Arguments)
                         LowerExpression(arg.Value);
-                    _currentBlock.Emit(new IrCallDotNetStatic(chainType, methodName, call.Arguments.Count, call.Span));
+                    _currentBlock.Emit(new IrCallDotNetStatic(chainType, resolvedChainName, call.Arguments.Count, call.Span));
                     return;
                 }
             }
@@ -2336,15 +2342,16 @@ public sealed class IrLowering
             if (objType is DotNetType dotNetObjType)
             {
                 // Check if the method actually exists on the type before emitting an instance call.
-                // If not, fall through to extension method resolution (e.g., app.map_get → MapGet extension).
+                // Try original name first (exact match), then snake_case→PascalCase conversion.
                 var resolver2 = _typeChecker.DotNetResolver;
-                var instanceMethod = resolver2.ResolveMethod(dotNetObjType.ClrBackingType, member.Member, call.Arguments.Count, isStatic: false);
+                var instanceMethod = resolver2.ResolveMethod(dotNetObjType.ClrBackingType, originalName, call.Arguments.Count, isStatic: false);
+                var resolvedMethodName = instanceMethod?.Name ?? methodName;
                 if (instanceMethod is not null)
                 {
                     LowerExpression(member.Object);
                     foreach (var arg in call.Arguments)
                         LowerExpression(arg.Value);
-                    _currentBlock.Emit(new IrCallDotNetInstance(dotNetObjType.ClrBackingType, methodName, call.Arguments.Count, call.Span));
+                    _currentBlock.Emit(new IrCallDotNetInstance(dotNetObjType.ClrBackingType, resolvedMethodName, call.Arguments.Count, call.Span));
                     return;
                 }
                 // Method not found on the type — fall through to extension method check below

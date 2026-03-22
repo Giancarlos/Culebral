@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "Culebral Contributors",
+  "classifications": [ "Common", "Console", "Culebral" ],
+  "identity": "Culebral.Templates.Console",
+  "name": "Culebral Console Application",
+  "shortName": "culebral",
+  "tags": {
+    "language": "Culebral",
+    "type": "project"
+  },
+  "sourceName": "CuleralConsole",
+  "preferNameDirectory": true,
+  "symbols": {
+    "framework": {
+      "type": "parameter",
+      "description": "The target framework for the project.",
+      "datatype": "choice",
+      "choices": [
+        {
+          "choice": "net10.0",
+          "description": "Target .NET 10"
+        },
+        {
+          "choice": "net9.0",
+          "description": "Target .NET 9"
+        }
+      ],
+      "defaultValue": "net10.0",
+      "replaces": "net10.0"
+    }
+  }
+}

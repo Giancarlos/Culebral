@@ -1,0 +1,5 @@
+# Your first Culebral program.
+# Culebral: Python syntax, .NET power.
+
+def main():
+    print("Hello from Culebral!")

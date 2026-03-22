@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageType>Template</PackageType>
+    <PackageVersion>0.1.0</PackageVersion>
+    <PackageId>Culebral.Templates</PackageId>
+    <Title>Culebral Project Templates</Title>
+    <Authors>Culebral Contributors</Authors>
+    <Description>Project templates for the Culebral programming language. Includes console, web API, and class library templates.</Description>
+    <PackageTags>dotnet-new;templates;culebral;python;dotnet</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+
+    <TargetFramework>net10.0</TargetFramework>
+    <IncludeContentInPack>true</IncludeContentInPack>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <ContentTargetFolders>content</ContentTargetFolders>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <NoDefaultExcludes>true</NoDefaultExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="culebral-console\**\*" Exclude="culebral-console\**\bin\**;culebral-console\**\obj\**" />
+    <Content Include="culebral-web\**\*" Exclude="culebral-web\**\bin\**;culebral-web\**\obj\**" />
+    <Content Include="culebral-classlib\**\*" Exclude="culebral-classlib\**\bin\**;culebral-classlib\**\obj\**" />
+
+    <Compile Remove="**\*" />
+  </ItemGroup>
+
+</Project>

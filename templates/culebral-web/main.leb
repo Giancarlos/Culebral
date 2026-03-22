@@ -1,0 +1,24 @@
+# Culebral ASP.NET Web API
+# Python syntax running on ASP.NET's Kestrel web server.
+#
+# Run:   dotnet run --project ../../src/Culebral.Compiler -- run main.leb
+# Test:  curl http://localhost:5000/
+
+from Microsoft.AspNetCore.Builder import WebApplication
+from Microsoft.AspNetCore.Http import RequestDelegateFactory
+from Microsoft.Extensions.Hosting import HostingAbstractionsHostExtensions
+
+def main():
+    builder = WebApplication.create_builder()
+    app = builder.build()
+
+    handler = lambda: "Hello from Culebral on ASP.NET!"
+    rdf = RequestDelegateFactory.create(handler, None)
+    app.map_get("/", rdf.request_delegate)
+
+    print("Culebral Web API")
+    print("Listening on http://localhost:5000")
+    print("Try: curl http://localhost:5000/")
+
+    app.urls.add("http://localhost:5000")
+    app.run()

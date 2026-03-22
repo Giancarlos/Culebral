@@ -1,0 +1,11 @@
+# Culebral Class Library
+# Export classes and functions for use by other projects.
+
+class Greeter:
+    name: str
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def greet(self) -> str:
+        return f"Hello, {self.name}!"
