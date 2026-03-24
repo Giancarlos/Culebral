@@ -1169,16 +1169,16 @@ public sealed class CilEmitter
 
             case IrLoadField { DeclaringType: var dt, FieldName: var fname }:
             {
-                var key = $"{dt}.{fname}";
-                if (_fieldBuilders.TryGetValue(key, out var loadFb))
+                var loadFb = ResolveFieldInHierarchy(dt, fname);
+                if (loadFb is not null)
                     il.Emit(OpCodes.Ldfld, loadFb);
                 break;
             }
 
             case IrStoreField { DeclaringType: var dt, FieldName: var fname }:
             {
-                var key = $"{dt}.{fname}";
-                if (_fieldBuilders.TryGetValue(key, out var storeFb))
+                var storeFb = ResolveFieldInHierarchy(dt, fname);
+                if (storeFb is not null)
                 {
                     // Auto-box value types when storing to object fields (type erasure)
                     if (storeFb.FieldType == typeof(object))
@@ -3441,8 +3441,9 @@ public sealed class CilEmitter
 
     private void EmitMethodCall(ILGenerator il, string declaringType, string methodName, int argc)
     {
-        var key = $"{declaringType}.{methodName}";
-        if (_methodBuilders.TryGetValue(key, out var mb))
+        // Walk the type hierarchy: try declaringType first, then base types
+        var mb = ResolveMethodInHierarchy(declaringType, methodName);
+        if (mb is not null)
         {
             // Value types (structs) need special handling: instance methods require
             // a managed pointer (address) as 'this', not the value itself.
@@ -3489,6 +3490,62 @@ public sealed class CilEmitter
                 SourceSpan.None);
             EmitVirtualCall(il, methodName, argc);
         }
+    }
+
+    /// <summary>
+    /// Walks the type hierarchy to find a field. Checks declaringType first,
+    /// then each base type in the chain. Enables inherited field access.
+    /// </summary>
+    private FieldBuilder? ResolveFieldInHierarchy(string declaringType, string fieldName)
+    {
+        var currentType = declaringType;
+        while (currentType is not null)
+        {
+            var key = $"{currentType}.{fieldName}";
+            if (_fieldBuilders.TryGetValue(key, out var fb))
+                return fb;
+            if (_typeBuilders.TryGetValue(currentType, out var tb) && tb.BaseType is not null)
+            {
+                var baseName = tb.BaseType.Name;
+                if (_typeBuilders.ContainsKey(baseName))
+                    currentType = baseName;
+                else
+                    break;
+            }
+            else break;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Walks the type hierarchy to find a method. Checks declaringType first,
+    /// then each base type in the chain. Enables inherited method calls.
+    /// </summary>
+    private MethodBuilder? ResolveMethodInHierarchy(string declaringType, string methodName)
+    {
+        var currentType = declaringType;
+        while (currentType is not null)
+        {
+            var key = $"{currentType}.{methodName}";
+            if (_methodBuilders.TryGetValue(key, out var mb))
+                return mb;
+
+            // Walk to base type via TypeBuilder
+            if (_typeBuilders.TryGetValue(currentType, out var tb) && tb.BaseType is not null)
+            {
+                // Base might be a user type (in _typeBuilders) or System.Object
+                var baseName = tb.BaseType.Name;
+                if (_typeBuilders.ContainsKey(baseName))
+                    currentType = baseName;
+                else
+                    break; // Reached a .NET base type (Object, ValueType, etc.)
+            }
+            else
+            {
+                break;
+            }
+        }
+        return null;
     }
 
     private void EmitNewObj(ILGenerator il, string typeName, int argc, IrInstruction instr, IrFunction func)

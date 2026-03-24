@@ -4488,6 +4488,49 @@ public class EmitTests : IDisposable
     // ─── Inheritance and Virtual Dispatch Tests ───
 
     [Fact]
+    public void Inheritance_BaseMethod_Accessible()
+    {
+        var output = CompileAndRun("""
+            class Animal:
+                name: str = ""
+                def __init__(name: str):
+                    @name = name
+                def speak() -> str:
+                    return f"{@name} makes a sound"
+
+            class Dog(Animal):
+                def __init__(name: str):
+                    @name = name
+
+            def main():
+                d = Dog("Rex")
+                print(d.speak())
+            """);
+        Assert.Equal("Rex makes a sound", output);
+    }
+
+    [Fact]
+    public void Inheritance_MultiLevel()
+    {
+        var output = CompileAndRun("""
+            class A:
+                def who() -> str:
+                    return "A"
+
+            class B(A):
+                pass
+
+            class C(B):
+                pass
+
+            def main():
+                c = C()
+                print(c.who())
+            """);
+        Assert.Equal("A", output);
+    }
+
+    [Fact]
     public void Inheritance_MethodOverride()
     {
         var output = CompileAndRun("""

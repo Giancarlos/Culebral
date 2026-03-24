@@ -1653,24 +1653,26 @@ public sealed class IrLowering
                 if (dunderName is not null)
                 {
                     var leftTypeName = leftType?.DisplayName;
-                    if (leftTypeName is not null && _typeDefs.TryGetValue(leftTypeName, out var opTypeDef) &&
-                        opTypeDef.Methods.Any(m => m.Name == dunderName))
+                    var (foundType, _) = FindMethodInHierarchy(leftTypeName, dunderName);
+                    if (foundType is not null)
                     {
                         LowerExpression(bin.Left);
                         LowerExpression(bin.Right);
-                        _currentBlock!.Emit(new IrCallMethod(leftTypeName, dunderName, 1, expr.Span));
+                        _currentBlock!.Emit(new IrCallMethod(foundType, dunderName, 1, expr.Span));
                         break;
                     }
                     // __ne__ fallback: use __eq__ + not if __ne__ doesn't exist
-                    if (binOp == IrBinaryOpKind.NotEqual && leftTypeName is not null &&
-                        _typeDefs.TryGetValue(leftTypeName, out var neTypeDef) &&
-                        neTypeDef.Methods.Any(m => m.Name == "__eq__"))
+                    if (binOp == IrBinaryOpKind.NotEqual)
                     {
-                        LowerExpression(bin.Left);
-                        LowerExpression(bin.Right);
-                        _currentBlock!.Emit(new IrCallMethod(leftTypeName, "__eq__", 1, expr.Span));
-                        _currentBlock.Emit(new IrUnaryOp(IrUnaryOpKind.LogicalNot, expr.Span));
-                        break;
+                        var (eqType, _) = FindMethodInHierarchy(leftTypeName, "__eq__");
+                        if (eqType is not null)
+                        {
+                            LowerExpression(bin.Left);
+                            LowerExpression(bin.Right);
+                            _currentBlock!.Emit(new IrCallMethod(eqType, "__eq__", 1, expr.Span));
+                            _currentBlock.Emit(new IrUnaryOp(IrUnaryOpKind.LogicalNot, expr.Span));
+                            break;
+                        }
                     }
                 }
 
@@ -1724,12 +1726,11 @@ public sealed class IrLowering
                 var unaryDunder = UnaryOpToDunder(unary.Op);
                 var operandType = _typeChecker.ResolvedTypes.TryGetValue(unary.Operand, out var uot) ? uot : null;
                 var operandTypeName = operandType?.DisplayName;
-                if (unaryDunder is not null && operandTypeName is not null &&
-                    _typeDefs.TryGetValue(operandTypeName, out var uTypeDef) &&
-                    uTypeDef.Methods.Any(m => m.Name == unaryDunder))
+                var (unaryFoundType, _) = FindMethodInHierarchy(operandTypeName, unaryDunder);
+                if (unaryDunder is not null && unaryFoundType is not null)
                 {
                     LowerExpression(unary.Operand);
-                    _currentBlock!.Emit(new IrCallMethod(operandTypeName, unaryDunder, 0, expr.Span));
+                    _currentBlock!.Emit(new IrCallMethod(unaryFoundType, unaryDunder, 0, expr.Span));
                     break;
                 }
                 LowerExpression(unary.Operand);
@@ -3669,6 +3670,26 @@ public sealed class IrLowering
         TokenKind.KwNot => IrUnaryOpKind.LogicalNot,
         _ => IrUnaryOpKind.Negate,
     };
+
+    /// <summary>
+    /// Walks the type hierarchy to find a method. Returns (declaringTypeName, typeDef) or (null, null).
+    /// </summary>
+    private (string? TypeName, IrTypeDef? TypeDef) FindMethodInHierarchy(string? typeName, string? methodName)
+    {
+        if (typeName is null || methodName is null) return (null, null);
+        var current = typeName;
+        while (current is not null)
+        {
+            if (_typeDefs.TryGetValue(current, out var td) && td.Methods.Any(m => m.Name == methodName))
+                return (current, td);
+            // Walk to base type
+            if (_typeDefs.TryGetValue(current, out var currentTd) && currentTd.BaseType is not null)
+                current = currentTd.BaseType;
+            else
+                break;
+        }
+        return (null, null);
+    }
 
     private static string? BinaryOpToDunder(IrBinaryOpKind op) => op switch
     {
