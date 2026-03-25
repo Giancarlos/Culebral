@@ -5126,7 +5126,13 @@ public sealed class CilEmitter
 
     private static void EmitStringConcat(ILGenerator il, int partCount)
     {
-        if (partCount <= 1) return;
+        if (partCount == 0)
+        {
+            // Empty f-string: push ""
+            il.Emit(OpCodes.Ldstr, "");
+            return;
+        }
+        if (partCount == 1) return; // single part already on stack
 
         // Use String.Concat(string, string) iteratively
         var concatTwo = typeof(string).GetMethod("Concat", [typeof(string), typeof(string)])!;

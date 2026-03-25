@@ -1485,19 +1485,36 @@ public sealed class IrLowering
         // Emit iterable and get enumerator
         LowerExpression(forStmt.Iterable);
         var enumeratorLocal = CreateLocal("<enumerator>", PrimitiveType.Object);
-        // TODO: When IAsyncEnumerable detection is added, async for should emit
-        // IrCallVirtual("GetAsyncEnumerator") here and IrAwait on MoveNextAsync below.
-        _currentBlock.Emit(new IrCallVirtual("GetEnumerator", 0, forStmt.Span));
+
+        // Check if the iterable type implements IAsyncEnumerable for true async iteration
+        var iterableClrType = ResolveReceiverClrType(forStmt.Iterable);
+        var useAsyncIteration = forStmt.IsAsync && iterableClrType is not null &&
+            iterableClrType.GetInterfaces().Any(i =>
+                i.IsGenericType && i.GetGenericTypeDefinition().FullName == "System.Collections.Generic.IAsyncEnumerable`1");
+
+        if (useAsyncIteration)
+            _currentBlock.Emit(new IrCallVirtual("GetAsyncEnumerator", 0, forStmt.Span));
+        else
+            _currentBlock.Emit(new IrCallVirtual("GetEnumerator", 0, forStmt.Span));
         _currentBlock.Emit(new IrStoreLocal(enumeratorLocal.Index, forStmt.Span));
 
         _currentBlock.Emit(new IrBranch(condLabel, forStmt.Span));
 
-        // Condition: MoveNext()
+        // Condition: MoveNext() or await MoveNextAsync()
         var condBlock = new IrBasicBlock { Label = condLabel };
         _currentFunction.Body.Add(condBlock);
         _currentBlock = condBlock;
         _currentBlock.Emit(new IrLoadLocal(enumeratorLocal.Index, forStmt.Span));
-        _currentBlock.Emit(new IrCallVirtual("MoveNext", 0, forStmt.Span));
+        if (useAsyncIteration)
+        {
+            _currentBlock.Emit(new IrCallVirtual("MoveNextAsync", 0, forStmt.Span));
+            _awaitCounter++;
+            _currentBlock.Emit(new IrAwait(true, _awaitCounter, forStmt.Span));
+        }
+        else
+        {
+            _currentBlock.Emit(new IrCallVirtual("MoveNext", 0, forStmt.Span));
+        }
         // When MoveNext returns false: go to else check (if else exists) or end
         _currentBlock.Emit(new IrBranchIf(bodyLabel, hasElse ? elseCheckLabel! : endLabel, forStmt.Span));
 
@@ -2783,14 +2800,27 @@ public sealed class IrLowering
         LowerBlock(withStmt.Body);
 
         // Finally: dispose all context locals
-        // For async with: use DisposeAsync + IrAwait instead of Dispose
-        // TODO: When IAsyncDisposable detection is added, async with should emit
-        // IrCallVirtual("DisposeAsync") + IrAwait here for true async disposal.
         _currentBlock!.Emit(new IrBeginFinallyBlock(withStmt.Span));
         foreach (var ctxLocal in contextLocals)
         {
+            // Check if the context type implements IAsyncDisposable for true async disposal
+            var ctxExprType = contextLocals.IndexOf(ctxLocal) < withStmt.Items.Count
+                ? ResolveReceiverClrType(withStmt.Items[contextLocals.IndexOf(ctxLocal)].ContextExpr)
+                : null;
+            var useAsyncDispose = withStmt.IsAsync && ctxExprType is not null &&
+                typeof(IAsyncDisposable).IsAssignableFrom(ctxExprType);
+
             _currentBlock.Emit(new IrLoadLocal(ctxLocal.Index, withStmt.Span));
-            _currentBlock.Emit(new IrCallVirtual("Dispose", 0, withStmt.Span));
+            if (useAsyncDispose)
+            {
+                _currentBlock.Emit(new IrCallVirtual("DisposeAsync", 0, withStmt.Span));
+                _awaitCounter++;
+                _currentBlock.Emit(new IrAwait(false, _awaitCounter, withStmt.Span));
+            }
+            else
+            {
+                _currentBlock.Emit(new IrCallVirtual("Dispose", 0, withStmt.Span));
+            }
         }
 
         _currentBlock.Emit(new IrEndExceptionBlock(withStmt.Span));

@@ -15,6 +15,7 @@ public sealed class TypeChecker
     private readonly Dictionary<AstNode, CulebralType> _resolvedTypes = new();
     private string? _currentClassName;
     private readonly HashSet<string> _knownTypeParams = new();
+    private readonly Dictionary<string, List<Symbol>> _classFields = new();
     private readonly DotNetTypeResolver _dotNetResolver = new();
 
     /// <summary>
@@ -276,6 +277,26 @@ public sealed class TypeChecker
                 });
             }
         }
+
+        // Store this class's fields for inheritance by derived classes
+        var ownFields = new List<Symbol>();
+        foreach (var sym in classScope.GetLocalSymbols())
+            if (sym.Kind == SymbolKind.Field) ownFields.Add(sym);
+
+        // Inherit fields from base classes
+        foreach (var baseType in cls.Bases)
+        {
+            if (baseType is SimpleType baseSt && _classFields.TryGetValue(baseSt.Name, out var baseFields))
+            {
+                foreach (var baseSym in baseFields)
+                {
+                    classScope.TryDeclare(baseSym);
+                    ownFields.Add(baseSym);
+                }
+            }
+        }
+
+        _classFields[cls.Name] = ownFields;
 
         foreach (var member in cls.Members)
         {
