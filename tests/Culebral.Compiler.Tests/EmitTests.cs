@@ -2591,6 +2591,191 @@ public class EmitTests : IDisposable
         Assert.Equal("3", output);
     }
 
+    [Fact]
+    public void Yield_EmptyGenerator()
+    {
+        // Generator that yields nothing — loop body never executes
+        var output = CompileAndRun("""
+            def nothing():
+                if False:
+                    yield 1
+
+            def main():
+                count = 0
+                for x in nothing():
+                    count = count + 1
+                print(count)
+            """);
+        Assert.Equal("0", output);
+    }
+
+    [Fact]
+    public void Yield_SingleElement()
+    {
+        // Generator that yields exactly one value
+        var output = CompileAndRun("""
+            def once():
+                yield 42
+
+            def main():
+                for x in once():
+                    print(x)
+            """);
+        Assert.Equal("42", output);
+    }
+
+    [Fact]
+    public void Yield_MultipleYieldStatements()
+    {
+        // Multiple sequential yield statements (not in a loop)
+        var output = CompileAndRun("""
+            def triple():
+                yield 1
+                yield 2
+                yield 3
+
+            def main():
+                for x in triple():
+                    print(x)
+            """);
+        Assert.Equal("1\n2\n3", output);
+    }
+
+    [Fact]
+    public void Yield_WithParameter()
+    {
+        // Generator that uses its parameter across yields
+        var output = CompileAndRun("""
+            def repeat(val: str, n: int):
+                i = 0
+                while i < n:
+                    yield val
+                    i = i + 1
+
+            def main():
+                for x in repeat("hi", 3):
+                    print(x)
+            """);
+        Assert.Equal("hi\nhi\nhi", output);
+    }
+
+    [Fact]
+    public void Yield_StatePreservedAcrossCalls()
+    {
+        // Verify local variable state is preserved between MoveNext calls
+        var output = CompileAndRun("""
+            def accumulator():
+                total = 0
+                total = total + 10
+                yield total
+                total = total + 20
+                yield total
+                total = total + 30
+                yield total
+
+            def main():
+                for x in accumulator():
+                    print(x)
+            """);
+        Assert.Equal("10\n30\n60", output);
+    }
+
+    [Fact]
+    public void Yield_WithConditionalYield()
+    {
+        // Yield inside an if branch — some iterations yield, some don't
+        var output = CompileAndRun("""
+            def fizz(n: int):
+                for i in range(n):
+                    if i % 3 == 0:
+                        yield i
+
+            def main():
+                for x in fizz(10):
+                    print(x)
+            """);
+        Assert.Equal("0\n3\n6\n9", output);
+    }
+
+    [Fact]
+    public void Yield_BreakMidIteration()
+    {
+        // Break out of a generator mid-iteration — generator should stop cleanly
+        var output = CompileAndRun("""
+            def naturals():
+                i = 0
+                while True:
+                    yield i
+                    i = i + 1
+
+            def main():
+                result = 0
+                for n in naturals():
+                    result = result + n
+                    if n == 4:
+                        break
+                print(result)
+            """);
+        // 0 + 1 + 2 + 3 + 4 = 10
+        Assert.Equal("10", output);
+    }
+
+    [Fact]
+    public void Yield_TwoGeneratorsIndependent()
+    {
+        // Two generators running independently — state doesn't leak
+        var output = CompileAndRun("""
+            def count_from(start: int, n: int):
+                i = start
+                while i < start + n:
+                    yield i
+                    i = i + 1
+
+            def main():
+                for a in count_from(0, 3):
+                    for b in count_from(10, 2):
+                        print(a + b)
+            """);
+        // a=0: 10,11  a=1: 11,12  a=2: 12,13
+        Assert.Equal("10\n11\n11\n12\n12\n13", output);
+    }
+
+    [Fact]
+    public void Yield_UsedWithList()
+    {
+        // Convert generator to list — exercises full iteration
+        var output = CompileAndRun("""
+            def squares(n: int):
+                for i in range(n):
+                    yield i * i
+
+            def main():
+                result = list(squares(5))
+                print(len(result))
+            """);
+        Assert.Equal("5", output);
+    }
+
+    [Fact]
+    public void Yield_InfiniteGenerator_WithBreak()
+    {
+        // Infinite generator — MUST be lazy or this hangs forever
+        var output = CompileAndRun("""
+            def forever():
+                i = 0
+                while True:
+                    yield i
+                    i = i + 1
+
+            def main():
+                for x in forever():
+                    if x == 5:
+                        break
+                print("done")
+            """);
+        Assert.Equal("done", output);
+    }
+
     // ─── Async For / Async With ───
 
     [Fact]
