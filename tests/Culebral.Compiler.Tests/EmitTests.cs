@@ -2568,6 +2568,47 @@ public class EmitTests : IDisposable
         Assert.Equal("0\n2\n4\n6\n8", output);
     }
 
+    [Fact]
+    public void Yield_LazyEvaluation()
+    {
+        // Verify generator doesn't evaluate everything upfront — break stops iteration early.
+        // A large n (1000000) would hang or OOM if evaluation was eager.
+        var output = CompileAndRun("""
+            def counter(n: int):
+                i = 0
+                while i < n:
+                    yield i
+                    i = i + 1
+
+            def main():
+                count = 0
+                for x in counter(1000000):
+                    count = count + 1
+                    if count == 3:
+                        break
+                print(count)
+            """);
+        Assert.Equal("3", output);
+    }
+
+    // ─── Async For / Async With ───
+
+    [Fact]
+    public void AsyncFor_ParsesWithAsyncFlag()
+    {
+        // Verify async for compiles — behaves like sync for since items is not IAsyncEnumerable
+        var output = CompileAndRun("""
+            async def process():
+                items = [1, 2, 3]
+                async for x in items:
+                    print(x)
+
+            def main():
+                process()
+            """);
+        Assert.Equal("1\n2\n3", output);
+    }
+
     // ─── Phase 4: Generic Constraints ───
 
     [Fact]

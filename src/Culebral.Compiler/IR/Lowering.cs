@@ -1461,6 +1461,8 @@ public sealed class IrLowering
         var hasElse = forStmt.ElseBody is not null;
 
         // Desugar: for x in iterable → get enumerator, while MoveNext, x = Current
+        // For async for: when the iterable implements IAsyncEnumerable, use GetAsyncEnumerator/MoveNextAsync
+        // with IrAwait. For now, async for over regular IEnumerable falls back to sync enumeration.
         var condLabel = NewBlockLabel("for_cond");
         var bodyLabel = NewBlockLabel("for_body");
         var endLabel = NewBlockLabel("for_end");
@@ -1483,6 +1485,8 @@ public sealed class IrLowering
         // Emit iterable and get enumerator
         LowerExpression(forStmt.Iterable);
         var enumeratorLocal = CreateLocal("<enumerator>", PrimitiveType.Object);
+        // TODO: When IAsyncEnumerable detection is added, async for should emit
+        // IrCallVirtual("GetAsyncEnumerator") here and IrAwait on MoveNextAsync below.
         _currentBlock.Emit(new IrCallVirtual("GetEnumerator", 0, forStmt.Span));
         _currentBlock.Emit(new IrStoreLocal(enumeratorLocal.Index, forStmt.Span));
 
@@ -2779,6 +2783,9 @@ public sealed class IrLowering
         LowerBlock(withStmt.Body);
 
         // Finally: dispose all context locals
+        // For async with: use DisposeAsync + IrAwait instead of Dispose
+        // TODO: When IAsyncDisposable detection is added, async with should emit
+        // IrCallVirtual("DisposeAsync") + IrAwait here for true async disposal.
         _currentBlock!.Emit(new IrBeginFinallyBlock(withStmt.Span));
         foreach (var ctxLocal in contextLocals)
         {

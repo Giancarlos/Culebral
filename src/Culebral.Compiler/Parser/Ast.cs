@@ -96,11 +96,13 @@ public sealed record ForStatement(
     Expression Iterable,
     Block Body,
     Block? ElseBody,
+    bool IsAsync,
     SourceSpan Span) : Statement(Span);
 
 public sealed record WithStatement(
     List<WithItem> Items,
     Block Body,
+    bool IsAsync,
     SourceSpan Span) : Statement(Span);
 
 public sealed record WithItem(

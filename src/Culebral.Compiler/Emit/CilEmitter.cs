@@ -424,7 +424,11 @@ public sealed class CilEmitter
         if (typeDef.Kind == IrTypeKind.Interface && !isInterfaceDefaultMethod)
             return;
 
-        if (method.IsAsync && HasAwaitPoints(method))
+        if (method.IsGenerator)
+        {
+            EmitGeneratorStateMachine(mb, method, tb);
+        }
+        else if (method.IsAsync && HasAwaitPoints(method))
         {
             EmitAsyncStateMachine(mb, method, tb);
         }
@@ -719,7 +723,11 @@ public sealed class CilEmitter
         // Pass 2: Emit all method bodies (all methods are now resolvable)
         foreach (var (func, mb) in functionsToEmit)
         {
-            if (func.IsAsync && HasAwaitPoints(func))
+            if (func.IsGenerator)
+            {
+                EmitGeneratorStateMachine(mb, func, programType);
+            }
+            else if (func.IsAsync && HasAwaitPoints(func))
             {
                 EmitAsyncStateMachine(mb, func, programType);
             }
@@ -1839,6 +1847,19 @@ public sealed class CilEmitter
     }
 
     /// <summary>
+    /// Counts the number of IrYield instructions in a function.
+    /// </summary>
+    private static int CountYieldPoints(IrFunction func)
+    {
+        int count = 0;
+        foreach (var block in func.Body)
+            foreach (var instr in block.Instructions)
+                if (instr is IrYield)
+                    count++;
+        return count;
+    }
+
+    /// <summary>
     /// Emits a true async state machine for a function that contains await points.
     /// Creates a nested state machine type, rewrites the stub method to start it,
     /// and emits MoveNext() with suspension/resumption logic.
@@ -2196,6 +2217,369 @@ public sealed class CilEmitter
         }
 
         smType.CreateType();
+    }
+
+    /// <summary>
+    /// Emits a lazy generator state machine for a function that contains yield points.
+    /// Creates a nested class implementing IEnumerable&lt;object&gt; and IEnumerator&lt;object&gt;.
+    /// The stub method creates a generator instance, copies params, and returns it.
+    /// MoveNext() dispatches to the correct state (one per yield point) and sets _current.
+    /// </summary>
+    private void EmitGeneratorStateMachine(MethodBuilder stubMethod, IrFunction func, TypeBuilder parentType)
+    {
+        var yieldCount = CountYieldPoints(func);
+
+        // ── A. Define the generator class ──
+        var genName = $"<{func.Name}>d__Generator";
+        var genType = _moduleBuilder.DefineType(genName,
+            TypeAttributes.NotPublic | TypeAttributes.Sealed | TypeAttributes.BeforeFieldInit,
+            typeof(object),
+            [
+                typeof(IEnumerable<object>),
+                typeof(System.Collections.IEnumerable),
+                typeof(IEnumerator<object>),
+                typeof(System.Collections.IEnumerator),
+                typeof(IDisposable)
+            ]);
+
+        // Fields
+        var stateField = genType.DefineField("_state", typeof(int), FieldAttributes.Private);
+        var currentField = genType.DefineField("_current", typeof(object), FieldAttributes.Private);
+
+        // Argument fields (one per parameter)
+        var argFields = new FieldBuilder[func.Parameters.Count];
+        for (int i = 0; i < func.Parameters.Count; i++)
+        {
+            argFields[i] = genType.DefineField($"_arg_{i}", typeof(object), FieldAttributes.Public);
+        }
+
+        // Local fields (hoisted locals — one per IR local)
+        var localFields = new FieldBuilder[func.Locals.Count];
+        for (int i = 0; i < func.Locals.Count; i++)
+        {
+            localFields[i] = genType.DefineField($"_local_{i}", typeof(object), FieldAttributes.Public);
+        }
+
+        // ── B. Constructor (default) ──
+        ConstructorBuilder genCtor;
+        {
+            genCtor = genType.DefineConstructor(
+                MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName,
+                CallingConventions.Standard, Type.EmptyTypes);
+            var il = genCtor.GetILGenerator();
+            // Call base Object..ctor()
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Call, typeof(object).GetConstructor(Type.EmptyTypes)!);
+            // Set initial state to 0 (not started — MoveNext will begin from state 0)
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldc_I4_0);
+            il.Emit(OpCodes.Stfld, stateField);
+            il.Emit(OpCodes.Ret);
+        }
+
+        // ── C. Emit stub method body ──
+        {
+            var il = stubMethod.GetILGenerator();
+            // Create generator instance using the ConstructorBuilder directly
+            il.Emit(OpCodes.Newobj, genCtor);
+
+            // Copy parameters to arg fields
+            for (int i = 0; i < func.Parameters.Count; i++)
+            {
+                il.Emit(OpCodes.Dup);
+                EmitLoadArg(il, func.IsStatic ? i : i + 1);
+                // Box value types to object
+                var paramType = ResolveClrType(func.Parameters[i].Type);
+                if (paramType.IsValueType)
+                    il.Emit(OpCodes.Box, paramType);
+                il.Emit(OpCodes.Stfld, argFields[i]);
+            }
+
+            il.Emit(OpCodes.Ret);
+        }
+
+        // ── D. Emit MoveNext() → bool ──
+        {
+            var moveNextMethod = genType.DefineMethod("MoveNext",
+                MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.Final | MethodAttributes.NewSlot,
+                typeof(bool), Type.EmptyTypes);
+
+            var il = moveNextMethod.GetILGenerator();
+
+            // Scratch local for storing values before writing to fields
+            var scratchLocal = il.DeclareLocal(typeof(object));
+            // Local for state value (avoid stack imbalance with dup approach)
+            var stateLocal = il.DeclareLocal(typeof(int));
+
+            // Create labels for all basic blocks
+            var blockLabels = new Dictionary<string, Label>();
+            foreach (var block in func.Body)
+                blockLabels[block.Label] = il.DefineLabel();
+
+            // Create resume labels for each yield point
+            var resumeLabels = new Label[yieldCount];
+            for (int i = 0; i < yieldCount; i++)
+                resumeLabels[i] = il.DefineLabel();
+
+            var finishedLabel = il.DefineLabel();
+
+            // State dispatch: load state into local, then use comparisons
+            // State 0: start from the beginning
+            // State 1..N: resume after yield 0..N-1
+            // State -1: finished
+            var startLabel = il.DefineLabel();
+
+            // Load state into local
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldfld, stateField);
+            il.Emit(OpCodes.Stloc, stateLocal);
+
+            // If state == -1, return false
+            il.Emit(OpCodes.Ldloc, stateLocal);
+            il.Emit(OpCodes.Ldc_I4_M1);
+            il.Emit(OpCodes.Beq, finishedLabel);
+
+            // If state == 0, jump to start
+            il.Emit(OpCodes.Ldloc, stateLocal);
+            il.Emit(OpCodes.Brfalse, startLabel);
+
+            // For states 1..N, use switch on (state - 1)
+            if (yieldCount > 0)
+            {
+                il.Emit(OpCodes.Ldloc, stateLocal);
+                il.Emit(OpCodes.Ldc_I4_1);
+                il.Emit(OpCodes.Sub);
+                il.Emit(OpCodes.Switch, resumeLabels);
+            }
+
+            // Unknown state → return false
+            il.Emit(OpCodes.Br, finishedLabel);
+
+            // ── State 0: start from the beginning ──
+            il.MarkLabel(startLabel);
+
+            // ── Emit the function body with rewrites ──
+            int yieldIndex = 0;
+
+            foreach (var block in func.Body)
+            {
+                il.MarkLabel(blockLabels[block.Label]);
+
+                foreach (var instr in block.Instructions)
+                {
+                    switch (instr)
+                    {
+                        case IrLoadLocal { Index: var idx }:
+                        {
+                            // Hoisted: ldarg.0; ldfld _local_{idx}; unbox if value type
+                            il.Emit(OpCodes.Ldarg_0);
+                            il.Emit(OpCodes.Ldfld, localFields[idx]);
+                            var localClrType = idx < func.Locals.Count ? ResolveClrType(func.Locals[idx].Type) : typeof(object);
+                            if (localClrType.IsValueType)
+                                il.Emit(OpCodes.Unbox_Any, localClrType);
+                            break;
+                        }
+
+                        case IrStoreLocal { Index: var idx }:
+                        {
+                            // Hoisted: box if value type, then stloc scratch; ldarg.0; ldloc scratch; stfld
+                            var localClrType = idx < func.Locals.Count ? ResolveClrType(func.Locals[idx].Type) : typeof(object);
+                            if (localClrType.IsValueType)
+                                il.Emit(OpCodes.Box, localClrType);
+                            il.Emit(OpCodes.Stloc, scratchLocal);
+                            il.Emit(OpCodes.Ldarg_0);
+                            il.Emit(OpCodes.Ldloc, scratchLocal);
+                            il.Emit(OpCodes.Stfld, localFields[idx]);
+                            break;
+                        }
+
+                        case IrLoadArg { Index: var idx }:
+                            if (!func.IsStatic && idx == 0)
+                            {
+                                il.Emit(OpCodes.Ldarg_0);
+                            }
+                            else
+                            {
+                                var paramIdx = func.IsStatic ? idx : idx - 1;
+                                if (paramIdx >= 0 && paramIdx < argFields.Length)
+                                {
+                                    il.Emit(OpCodes.Ldarg_0);
+                                    il.Emit(OpCodes.Ldfld, argFields[paramIdx]);
+                                    // Unbox value types (args are stored as object)
+                                    var argClrType = paramIdx < func.Parameters.Count
+                                        ? ResolveClrType(func.Parameters[paramIdx].Type) : typeof(object);
+                                    if (argClrType.IsValueType)
+                                        il.Emit(OpCodes.Unbox_Any, argClrType);
+                                }
+                                else
+                                {
+                                    il.Emit(OpCodes.Ldnull);
+                                }
+                            }
+                            break;
+
+                        case IrLoadThis:
+                            il.Emit(OpCodes.Ldarg_0);
+                            break;
+
+                        case IrReturn:
+                            // Generator function returning → set state to -1, return false
+                            il.Emit(instr is IrReturn { HasValue: true } ? OpCodes.Pop : OpCodes.Nop);
+                            il.Emit(OpCodes.Ldarg_0);
+                            il.Emit(OpCodes.Ldc_I4_M1);
+                            il.Emit(OpCodes.Stfld, stateField);
+                            il.Emit(OpCodes.Ldc_I4_0);
+                            il.Emit(OpCodes.Ret);
+                            break;
+
+                        case IrYield:
+                        {
+                            // Stack has: [value]
+                            // Store to _current, set state, return true
+                            il.Emit(OpCodes.Stloc, scratchLocal);
+                            il.Emit(OpCodes.Ldarg_0);
+                            il.Emit(OpCodes.Ldloc, scratchLocal);
+                            il.Emit(OpCodes.Stfld, currentField);
+
+                            // Set state to yieldIndex + 1 (state N means "resume after yield N-1")
+                            il.Emit(OpCodes.Ldarg_0);
+                            il.Emit(OpCodes.Ldc_I4, yieldIndex + 1);
+                            il.Emit(OpCodes.Stfld, stateField);
+
+                            // Return true
+                            il.Emit(OpCodes.Ldc_I4_1);
+                            il.Emit(OpCodes.Ret);
+
+                            // Resume label: when MoveNext is called again with state == yieldIndex+1
+                            il.MarkLabel(resumeLabels[yieldIndex]);
+
+                            yieldIndex++;
+                            break;
+                        }
+
+                        case IrBranch { TargetLabel: var target }:
+                            if (blockLabels.TryGetValue(target, out var brTarget))
+                                il.Emit(OpCodes.Br, brTarget);
+                            break;
+
+                        case IrBranchIf { TrueLabel: var trueLabel, FalseLabel: var falseLabel }:
+                            if (blockLabels.TryGetValue(trueLabel, out var tl))
+                                il.Emit(OpCodes.Brtrue, tl);
+                            if (blockLabels.TryGetValue(falseLabel, out var fl))
+                                il.Emit(OpCodes.Br, fl);
+                            break;
+
+                        default:
+                            // For all other instructions, emit them normally using empty locals
+                            EmitInstruction(il, instr, [], blockLabels, func, null);
+                            break;
+                    }
+                }
+            }
+
+            // If we fall through (no more yields or returns), set state to -1, return false
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldc_I4_M1);
+            il.Emit(OpCodes.Stfld, stateField);
+            il.Emit(OpCodes.Ldc_I4_0);
+            il.Emit(OpCodes.Ret);
+
+            // Finished label (state == -1 or unknown)
+            il.MarkLabel(finishedLabel);
+            il.Emit(OpCodes.Ldc_I4_0);
+            il.Emit(OpCodes.Ret);
+
+            genType.DefineMethodOverride(moveNextMethod,
+                typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
+        }
+
+        // ── E. Current property (IEnumerator<object>.Current) ──
+        {
+            var currentProp = genType.DefineProperty("Current", PropertyAttributes.None, typeof(object), null);
+            var getter = genType.DefineMethod("get_Current",
+                MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.Final | MethodAttributes.NewSlot | MethodAttributes.SpecialName,
+                typeof(object), Type.EmptyTypes);
+            var il = getter.GetILGenerator();
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldfld, currentField);
+            il.Emit(OpCodes.Ret);
+            currentProp.SetGetMethod(getter);
+
+            genType.DefineMethodOverride(getter,
+                typeof(IEnumerator<object>).GetProperty("Current")!.GetGetMethod()!);
+        }
+
+        // ── F. Current property (IEnumerator.Current — non-generic) ──
+        {
+            var currentPropNG = genType.DefineProperty("System.Collections.IEnumerator.Current",
+                PropertyAttributes.None, typeof(object), null);
+            var getterNG = genType.DefineMethod("System.Collections.IEnumerator.get_Current",
+                MethodAttributes.Private | MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.Final | MethodAttributes.NewSlot | MethodAttributes.SpecialName,
+                typeof(object), Type.EmptyTypes);
+            var il = getterNG.GetILGenerator();
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldfld, currentField);
+            il.Emit(OpCodes.Ret);
+            currentPropNG.SetGetMethod(getterNG);
+
+            genType.DefineMethodOverride(getterNG,
+                typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
+        }
+
+        // ── G. GetEnumerator() → IEnumerator<object> ──
+        {
+            var getEnum = genType.DefineMethod("GetEnumerator",
+                MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.Final | MethodAttributes.NewSlot,
+                typeof(IEnumerator<object>), Type.EmptyTypes);
+            var il = getEnum.GetILGenerator();
+            // Return 'this' (single-use enumerator — generator instances are typically iterated once)
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ret);
+
+            genType.DefineMethodOverride(getEnum,
+                typeof(IEnumerable<object>).GetMethod("GetEnumerator")!);
+        }
+
+        // ── H. GetEnumerator() → IEnumerator (non-generic IEnumerable) ──
+        {
+            var getEnumNG = genType.DefineMethod("System.Collections.IEnumerable.GetEnumerator",
+                MethodAttributes.Private | MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.Final | MethodAttributes.NewSlot,
+                typeof(System.Collections.IEnumerator), Type.EmptyTypes);
+            var il = getEnumNG.GetILGenerator();
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ret);
+
+            genType.DefineMethodOverride(getEnumNG,
+                typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!);
+        }
+
+        // ── I. Reset() ──
+        {
+            var resetMethod = genType.DefineMethod("Reset",
+                MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.Final | MethodAttributes.NewSlot,
+                typeof(void), Type.EmptyTypes);
+            var il = resetMethod.GetILGenerator();
+            // Throw NotSupportedException (standard for generators)
+            il.Emit(OpCodes.Newobj, typeof(NotSupportedException).GetConstructor(Type.EmptyTypes)!);
+            il.Emit(OpCodes.Throw);
+
+            genType.DefineMethodOverride(resetMethod,
+                typeof(System.Collections.IEnumerator).GetMethod("Reset")!);
+        }
+
+        // ── J. Dispose() (IDisposable — required by IEnumerator<T>) ──
+        {
+            var disposeMethod = genType.DefineMethod("Dispose",
+                MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.Final | MethodAttributes.NewSlot,
+                typeof(void), Type.EmptyTypes);
+            var il = disposeMethod.GetILGenerator();
+            il.Emit(OpCodes.Ret); // No-op dispose
+
+            genType.DefineMethodOverride(disposeMethod,
+                typeof(IDisposable).GetMethod("Dispose")!);
+        }
+
+        genType.CreateType();
     }
 
     /// <summary>

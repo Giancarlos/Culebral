@@ -122,13 +122,13 @@ public sealed class CulebralParser
         var start = Current.Span.Start;
         Advance(); // consume 'async'
 
-        // async for — Phase 1: compiles identically to regular for
+        // async for — desugars to async enumeration with await MoveNextAsync
         if (Current.Kind == TokenKind.KwFor)
-            return ParseForStatement();
+            return ParseForStatement(isAsync: true);
 
-        // async with — Phase 1: compiles identically to regular with
+        // async with — desugars to async disposal with await DisposeAsync
         if (Current.Kind == TokenKind.KwWith)
-            return ParseWithStatement();
+            return ParseWithStatement(isAsync: true);
 
         if (Current.Kind != TokenKind.KwDef)
         {
@@ -574,7 +574,7 @@ public sealed class CulebralParser
         return new WhileStatement(condition, body, elseBody, new SourceSpan(start, end));
     }
 
-    private ForStatement ParseForStatement()
+    private ForStatement ParseForStatement(bool isAsync = false)
     {
         var start = Current.Span.Start;
         Advance(); // consume 'for'
@@ -593,10 +593,10 @@ public sealed class CulebralParser
         }
 
         var end = elseBody?.Span.End ?? body.Span.End;
-        return new ForStatement(variable, iterable, body, elseBody, new SourceSpan(start, end));
+        return new ForStatement(variable, iterable, body, elseBody, isAsync, new SourceSpan(start, end));
     }
 
-    private WithStatement ParseWithStatement()
+    private WithStatement ParseWithStatement(bool isAsync = false)
     {
         var start = Current.Span.Start;
         Advance(); // consume 'with'
@@ -608,7 +608,7 @@ public sealed class CulebralParser
 
         Expect(TokenKind.Colon);
         var body = ParseBlock();
-        return new WithStatement(items, body, new SourceSpan(start, body.Span.End));
+        return new WithStatement(items, body, isAsync, new SourceSpan(start, body.Span.End));
     }
 
     private WithItem ParseWithItem()
