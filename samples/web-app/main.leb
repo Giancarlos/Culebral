@@ -1,0 +1,82 @@
+# ─── Culebral ASP.NET Web Application ───
+#
+# Demonstrates all HTTP methods with ASP.NET Minimal APIs.
+# Written in Python-like Culebral syntax, compiled to .NET CIL.
+#
+# Run:
+#   cd samples/web-app
+#   dotnet run --project ../../src/Culebral.Compiler -- run main.leb
+#
+# Then visit http://localhost:5000/
+
+from Microsoft.AspNetCore.Builder import WebApplication
+from Microsoft.AspNetCore.Http import RequestDelegateFactory
+from Microsoft.Extensions.Hosting import HostingAbstractionsHostExtensions
+
+def main():
+    builder = WebApplication.create_builder()
+    app = builder.build()
+
+    # ── GET / → HTML Home Page ──
+
+    home = lambda: "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Culebral Web App</title><style>body{font-family:system-ui;background:#0a0a0a;color:#e0e0e0;max-width:800px;margin:0 auto;padding:2rem}h1{color:#60a5fa}h2{color:#a78bfa;margin-top:2rem}code{background:#1a1a2e;padding:0.15rem 0.4rem;border-radius:4px}.sub{color:#888}.ep{margin:0.5rem 0}.g{color:#6ee7b7}.p{color:#fbbf24}.d{color:#fca5a5}.u{color:#60a5fa}pre{background:#111;padding:1rem;border-radius:8px}</style></head><body><h1>Culebral Web App</h1><p class='sub'>Python syntax. .NET runtime. ASP.NET Kestrel.</p><h2>Endpoints</h2><p class='ep'><b class='g'>GET</b> <code>/health</code> Health check</p><p class='ep'><b class='g'>GET</b> <code>/api/hello</code> JSON greeting</p><p class='ep'><b class='g'>GET</b> <code>/api/message</code> Get message</p><p class='ep'><b class='u'>PUT</b> <code>/api/message</code> Set message</p><p class='ep'><b class='p'>POST</b> <code>/api/echo</code> Echo POST</p><p class='ep'><b class='d'>DELETE</b> <code>/api/reset</code> Reset</p><h2>Try It</h2><pre>curl http://localhost:5000/api/hello</pre><footer style='margin-top:3rem;border-top:1px solid #222;padding-top:1rem;color:#555'>Powered by Culebral</footer></body></html>"
+    home_rdf = RequestDelegateFactory.create(home, None)
+    app.map_get("/", home_rdf.request_delegate)
+
+    # ── GET /health → Plain Text ──
+
+    health = lambda: "ok"
+    health_rdf = RequestDelegateFactory.create(health, None)
+    app.map_get("/health", health_rdf.request_delegate)
+
+    # ── GET /api/hello → JSON ──
+
+    hello = lambda: '{"greeting":"Hello from Culebral!","runtime":".NET 10","language":"Culebral","status":"operational"}'
+    hello_rdf = RequestDelegateFactory.create(hello, None)
+    app.map_get("/api/hello", hello_rdf.request_delegate)
+
+    # ── GET /api/message → JSON ──
+
+    get_msg = lambda: '{"message":"Hello World","version":"1.0"}'
+    get_msg_rdf = RequestDelegateFactory.create(get_msg, None)
+    app.map_get("/api/message", get_msg_rdf.request_delegate)
+
+    # ── PUT /api/message → JSON ──
+
+    put_msg = lambda: '{"updated":true,"method":"PUT"}'
+    put_msg_rdf = RequestDelegateFactory.create(put_msg, None)
+    app.map_put("/api/message", put_msg_rdf.request_delegate)
+
+    # ── PATCH /api/message → JSON ──
+
+    patch_msg = lambda: '{"patched":true,"method":"PATCH"}'
+    patch_msg_rdf = RequestDelegateFactory.create(patch_msg, None)
+    app.map_patch("/api/message", patch_msg_rdf.request_delegate)
+
+    # ── POST /api/echo → JSON ──
+
+    echo = lambda: '{"echo":true,"method":"POST"}'
+    echo_rdf = RequestDelegateFactory.create(echo, None)
+    app.map_post("/api/echo", echo_rdf.request_delegate)
+
+    # ── DELETE /api/reset → JSON ──
+
+    reset = lambda: '{"reset":true,"method":"DELETE"}'
+    reset_rdf = RequestDelegateFactory.create(reset, None)
+    app.map_delete("/api/reset", reset_rdf.request_delegate)
+
+    # ── Start Server ──
+
+    print("Culebral Web App")
+    print("Listening on http://localhost:5000")
+    print("")
+    print("  GET    /               HTML home page")
+    print("  GET    /health         Health check")
+    print("  GET    /api/hello      JSON greeting")
+    print("  GET    /api/message    Get message")
+    print("  PUT    /api/message    Set message")
+    print("  PATCH  /api/message    Patch message")
+    print("  POST   /api/echo      Echo POST")
+    print("  DELETE /api/reset      Reset")
+
+    app.run("http://localhost:5000")
