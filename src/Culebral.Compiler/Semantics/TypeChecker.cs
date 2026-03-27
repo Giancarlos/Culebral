@@ -115,6 +115,13 @@ public sealed class TypeChecker
 
     private void DeclareFunctionSymbol(FunctionDef func)
     {
+        // Register function-level type parameters (def foo[T](x: T) -> T:)
+        if (func.TypeParameters is not null)
+        {
+            foreach (var tp in func.TypeParameters)
+                _knownTypeParams.Add(tp.Name);
+        }
+
         var paramTypes = func.Parameters.Select(p => ResolveTypeAnnotation(p.Type)).ToArray();
         var returnType = func.ReturnType is not null
             ? ResolveTypeAnnotation(func.ReturnType)
@@ -874,7 +881,7 @@ public sealed class TypeChecker
             CallExpr call => InferCall(call),
             MemberAccessExpr member => InferMemberAccess(member),
             IndexExpr index => InferIndex(index),
-            SliceExpr => PrimitiveType.Object, // TODO: proper slice typing
+            SliceExpr slice => InferSlice(slice),
 
             ListExpr list => InferList(list),
             DictExpr dict => InferDict(dict),
@@ -1209,9 +1216,34 @@ public sealed class TypeChecker
 
     private CulebralType InferIndex(IndexExpr index)
     {
-        InferType(index.Object);
+        var objType = InferType(index.Object);
         InferType(index.Index);
-        // TODO: resolve element type from container type
+        // Resolve element type from container type
+        if (objType is GenericInstanceType git)
+        {
+            return git.Name switch
+            {
+                "list" when git.TypeArgs.Length > 0 => git.TypeArgs[0],
+                "dict" when git.TypeArgs.Length > 1 => git.TypeArgs[1], // dict[key] → value type
+                _ => PrimitiveType.Object,
+            };
+        }
+        if (objType == PrimitiveType.Str) return PrimitiveType.Str; // str[i] → str (single char as string)
+        return PrimitiveType.Object;
+    }
+
+    private CulebralType InferSlice(SliceExpr slice)
+    {
+        var objType = InferType(slice.Object);
+        if (slice.Lower is not null) InferType(slice.Lower);
+        if (slice.Upper is not null) InferType(slice.Upper);
+        if (slice.Step is not null) InferType(slice.Step);
+        // Slicing a list returns a list of the same element type
+        if (objType is GenericInstanceType git && git.Name == "list")
+            return git;
+        // Slicing a string returns a string
+        if (objType == PrimitiveType.Str)
+            return PrimitiveType.Str;
         return PrimitiveType.Object;
     }
 
@@ -1358,7 +1390,7 @@ public sealed class TypeChecker
         var elemType = InferType(gen.Element);
         _currentScope = prevScope;
 
-        // Generator expressions are eagerly evaluated as lists for now
+        // Generator expressions are eagerly evaluated as lists (generator functions use lazy state machine)
         return new GenericInstanceType("list", [elemType], null);
     }
 

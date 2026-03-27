@@ -117,11 +117,10 @@ public sealed class CilEmitter
             // Apply class-level decorator attributes
             ApplyDecoratorAttributes(tb, typeDef);
 
-            // Note: Generic type parameter constraints are carried in IrTypeDef.TypeParameters
-            // and enforced at the type-checker level. We do not call DefineGenericParameters here
-            // because the compiler currently uses type erasure (T → object) for user-defined generics.
-            // Defining CLR-level generic parameters would require rewriting field/method type resolution
-            // to use GenericTypeParameterBuilder instead of object. This is tracked for a future phase.
+            // Design decision: type erasure for user-defined generics (T → object).
+            // Generic constraints are enforced at the type-checker level.
+            // CLR-level DefineGenericParameters is not called — all generic fields/methods
+            // use object, which is consistent with the type-erased IR representation.
         }
 
         // Second pass: define fields, constructors, methods, properties
@@ -2610,16 +2609,9 @@ public sealed class CilEmitter
         FieldBuilder? taskSaveField = null;
         if (hasResult)
         {
-            // We reuse the awaiterField's slot conceptually, but need a separate object field
-            // to save the task for later .Result access. We'll store it in a local for now.
-            // Actually, we need it to survive across suspension — use the state machine's scratch.
-            // Store the task object in the awaiter field (as object) — but field is TaskAwaiter type.
-            // Better: store in a local field. We'll add one dynamically.
-            // For simplicity, store the task reference in the local field for this await point.
-            // We'll use localFields if available, or add a dedicated task-save field.
-            //
-            // Cleanest approach: we already have the task on the stack. Dup it, store to a
-            // dedicated field, then continue with the void awaiter path.
+            // Save the task reference to a dedicated field for later .Result access.
+            // The task is duped: one copy goes to the void awaiter path (GetAwaiter),
+            // the other is saved for extracting the result after suspension/resumption.
             taskSaveField = smType.DefineField($"<>__task_{awaitId}", typeof(object), FieldAttributes.Public);
             il.Emit(OpCodes.Dup);
             il.Emit(OpCodes.Stloc, scratchLocal);
@@ -3303,7 +3295,7 @@ public sealed class CilEmitter
             case "dict":
             {
                 // dict() → new Dictionary<object, object>()
-                // Pop any args if passed (shouldn't be for now)
+                // Pop any args if passed (dict(iterable) not yet supported)
                 for (int i = 0; i < argc; i++)
                     il.Emit(OpCodes.Pop);
                 il.Emit(OpCodes.Newobj, typeof(Dictionary<object, object>).GetConstructor(Type.EmptyTypes)!);

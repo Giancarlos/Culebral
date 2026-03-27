@@ -12,16 +12,14 @@ namespace Culebral.Scripting;
 /// variable assignments at the top of each function body.
 ///
 /// Parameterless host functions registered via <see cref="SetFunction"/> are pre-computed
-/// at execution time and injected as global variables. Functions with parameters require
-/// in-process execution (future work) and are currently ignored during injection.
+/// at execution time and injected as global variables. Functions with parameters are
+/// injected as delegate-typed variables that the script can invoke directly.
 /// </summary>
 public sealed class CulebralEngine : IDisposable
 {
     private readonly Dictionary<string, object?> _globals = new();
     private readonly Dictionary<string, Delegate> _functions = new();
-    #pragma warning disable CS0414 // Reserved for future use (in-memory assembly caching)
     private string? _tempDir = null;
-    #pragma warning restore CS0414
 
     // ─── Global Variables (Host → Script) ───
 

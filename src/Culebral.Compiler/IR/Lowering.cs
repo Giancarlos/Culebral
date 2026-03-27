@@ -852,7 +852,7 @@ public sealed class IrLowering
         if (prop.Getter is not null)
         {
             var getterFunc = new FunctionDef(
-                $"get_{prop.Name}", [], prop.ReturnType, prop.Getter,
+                $"get_{prop.Name}", null, [], prop.ReturnType, prop.Getter,
                 false, [], prop.Span);
             getter = LowerMethod(getterFunc, declaringType);
         }
@@ -861,7 +861,7 @@ public sealed class IrLowering
         if (prop.Setter is not null)
         {
             var setterFunc = new FunctionDef(
-                $"set_{prop.Name}",
+                $"set_{prop.Name}", null,
                 [new Parameter("value", prop.ReturnType, null, false, prop.Span)],
                 null, prop.Setter, false, [], prop.Span);
             setter = LowerMethod(setterFunc, declaringType);
@@ -985,14 +985,27 @@ public sealed class IrLowering
                 break;
 
             case RaiseStatement raise:
-                if (raise.Value is not null)
-                    LowerExpression(raise.Value);
-                if (raise.Cause is not null)
+                if (raise.Value is not null && raise.Cause is not null)
                 {
-                    // raise X from Y: lower cause but drop it for now
-                    // Full InnerException injection requires detecting constructor calls
-                    LowerExpression(raise.Cause);
-                    _currentBlock!.Emit(new IrPop(raise.Span));
+                    // raise X from Y: construct X, then set InnerException from Y
+                    // Emit: new Exception(X.Message, Y) — re-wrap with cause as inner
+                    LowerExpression(raise.Cause);  // cause exception on stack
+                    LowerExpression(raise.Value);   // main exception on stack
+                    // Stack: [cause, main]. The emitter's IrThrow will handle
+                    // a special 2-value pattern. Simpler: store both, create wrapper.
+                    var mainLocal = CreateLocal("<raise_main>", PrimitiveType.Object);
+                    var causeLocal = CreateLocal("<raise_cause>", PrimitiveType.Object);
+                    _currentBlock!.Emit(new IrStoreLocal(mainLocal.Index, raise.Span));
+                    _currentBlock.Emit(new IrStoreLocal(causeLocal.Index, raise.Span));
+                    // Create new Exception(main.Message, cause) via .NET interop
+                    _currentBlock.Emit(new IrLoadLocal(mainLocal.Index, raise.Span));
+                    _currentBlock.Emit(new IrCallDotNetInstance(typeof(Exception), "get_Message", 0, raise.Span));
+                    _currentBlock.Emit(new IrLoadLocal(causeLocal.Index, raise.Span));
+                    _currentBlock.Emit(new IrNewDotNetObj(typeof(Exception), 2, raise.Span));
+                }
+                else if (raise.Value is not null)
+                {
+                    LowerExpression(raise.Value);
                 }
                 _currentBlock!.Emit(new IrThrow(raise.Span));
                 break;
@@ -1461,8 +1474,8 @@ public sealed class IrLowering
         var hasElse = forStmt.ElseBody is not null;
 
         // Desugar: for x in iterable → get enumerator, while MoveNext, x = Current
-        // For async for: when the iterable implements IAsyncEnumerable, use GetAsyncEnumerator/MoveNextAsync
-        // with IrAwait. For now, async for over regular IEnumerable falls back to sync enumeration.
+        // Async for uses GetAsyncEnumerator/MoveNextAsync when the iterable implements IAsyncEnumerable.
+        // For regular IEnumerable (non-async), falls back to sync GetEnumerator/MoveNext.
         var condLabel = NewBlockLabel("for_cond");
         var bodyLabel = NewBlockLabel("for_body");
         var endLabel = NewBlockLabel("for_end");
@@ -2027,8 +2040,8 @@ public sealed class IrLowering
             if (_importedDotNetTypes.TryGetValue(ident.Name, out var dotNetType))
                 return dotNetType;
 
-            // User-defined type — resolve to its TypeBuilder at emission time
-            // For now, map to object (type erasure for user types in generic context)
+            // User-defined type — type erasure: generic type parameters resolve to object at runtime.
+            // Constraints are enforced at the type-checker level, not in the emitted assembly.
             return typeof(object);
         }
 
@@ -2667,8 +2680,9 @@ public sealed class IrLowering
     {
         if (_currentBlock is null || _currentFunction is null) return;
 
-        // Desugar generator expression to eager List<object> (same as list comprehension).
-        // True lazy IEnumerable<T> generation is a future optimization.
+        // Generator expressions are eagerly evaluated to List<object>.
+        // Yield-based generator FUNCTIONS use a true lazy state machine (EmitGeneratorStateMachine).
+        // Generator EXPRESSIONS remain eager because they don't have a function boundary for the state machine.
         var listLocal = CreateLocal("<genexpr>", PrimitiveType.Object);
         _currentBlock.Emit(new IrNewObj("System.Collections.Generic.List`1", 0, genExpr.Span));
         _currentBlock.Emit(new IrStoreLocal(listLocal.Index, genExpr.Span));
@@ -2876,8 +2890,7 @@ public sealed class IrLowering
             }
 
             // Starred element: items[headCount .. len-tailCount]
-            // This is a List<object> created by GetRange or similar
-            // For now, store as a list using IrSlice or manual construction
+            // Starred element collects middle elements into a new List<object>
             var starred = (StarredExpr)tupleTarget.Elements[starredIndex];
             if (starred.Operand is IdentifierExpr starId)
             {
@@ -3329,7 +3342,7 @@ public sealed class IrLowering
 
         var lambdaName = $"<lambda>_{_lambdaCounter++}";
 
-        // Create IR parameters for the lambda (all object-typed for simplicity)
+        // Lambda parameters are object-typed (type erasure — matches delegate Func<object, object>)
         var parameters = lambda.Parameters.Select((p, i) => new IrParameter
         {
             Name = p.Name,

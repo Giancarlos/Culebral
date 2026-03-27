@@ -209,7 +209,7 @@ public sealed class LspServer
                     break;
 
                 case "textDocument/didSave":
-                    // Could re-run diagnostics; for now the didChange handler covers it
+                    HandleDidChange(@params); // Re-run diagnostics on save
                     break;
 
                 case "textDocument/hover":

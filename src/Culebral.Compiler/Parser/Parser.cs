@@ -89,8 +89,8 @@ public sealed class CulebralParser
         Expect(TokenKind.KwDef);
         var name = Expect(TokenKind.Identifier).Lexeme;
 
-        // Optional type parameters
-        // Not parsing them at function level yet for simplicity
+        // Optional type parameters: def foo[T](x: T) -> T:
+        var typeParams = TryParseTypeParameters();
 
         Expect(TokenKind.LeftParen);
         var parameters = ParseParameterList();
@@ -106,14 +106,14 @@ public sealed class CulebralParser
             Advance();
             var body = ParseBlock();
             return new FunctionDef(
-                name, parameters, returnType, body, isAsync,
+                name, typeParams, parameters, returnType, body, isAsync,
                 decorators ?? [], new SourceSpan(start, body.Span.End));
         }
 
         // No body — abstract method declaration
         var emptyBody = new Block([], SourceSpan.From(CurrentLocation()));
         return new FunctionDef(
-            name, parameters, returnType, emptyBody, isAsync,
+            name, typeParams, parameters, returnType, emptyBody, isAsync,
             decorators ?? [], new SourceSpan(start, CurrentLocation()));
     }
 

@@ -182,6 +182,7 @@ public sealed record ImportName(
 
 public sealed record FunctionDef(
     string Name,
+    List<TypeParameter>? TypeParameters,
     List<Parameter> Parameters,
     TypeAnnotation? ReturnType,
     Block Body,
