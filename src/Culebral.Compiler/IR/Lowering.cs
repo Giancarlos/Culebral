@@ -3715,11 +3715,11 @@ public sealed class IrLowering
     {
         if (typeName is null || methodName is null) return (null, null);
         var current = typeName;
-        while (current is not null)
+        var visited = new HashSet<string>();
+        while (current is not null && visited.Add(current))
         {
             if (_typeDefs.TryGetValue(current, out var td) && td.Methods.Any(m => m.Name == methodName))
                 return (current, td);
-            // Walk to base type
             if (_typeDefs.TryGetValue(current, out var currentTd) && currentTd.BaseType is not null)
                 current = currentTd.BaseType;
             else

@@ -3883,7 +3883,8 @@ public sealed class CilEmitter
     private FieldBuilder? ResolveFieldInHierarchy(string declaringType, string fieldName)
     {
         var currentType = declaringType;
-        while (currentType is not null)
+        var visited = new HashSet<string>();
+        while (currentType is not null && visited.Add(currentType))
         {
             var key = $"{currentType}.{fieldName}";
             if (_fieldBuilders.TryGetValue(key, out var fb))
@@ -3901,33 +3902,24 @@ public sealed class CilEmitter
         return null;
     }
 
-    /// <summary>
-    /// Walks the type hierarchy to find a method. Checks declaringType first,
-    /// then each base type in the chain. Enables inherited method calls.
-    /// </summary>
     private MethodBuilder? ResolveMethodInHierarchy(string declaringType, string methodName)
     {
         var currentType = declaringType;
-        while (currentType is not null)
+        var visited = new HashSet<string>();
+        while (currentType is not null && visited.Add(currentType))
         {
             var key = $"{currentType}.{methodName}";
             if (_methodBuilders.TryGetValue(key, out var mb))
                 return mb;
-
-            // Walk to base type via TypeBuilder
             if (_typeBuilders.TryGetValue(currentType, out var tb) && tb.BaseType is not null)
             {
-                // Base might be a user type (in _typeBuilders) or System.Object
                 var baseName = tb.BaseType.Name;
                 if (_typeBuilders.ContainsKey(baseName))
                     currentType = baseName;
                 else
-                    break; // Reached a .NET base type (Object, ValueType, etc.)
+                    break;
             }
-            else
-            {
-                break;
-            }
+            else break;
         }
         return null;
     }
@@ -5685,9 +5677,9 @@ public sealed class CilEmitter
             }
             else
             {
-                // Delta IL offset (must be > 0 for non-hidden points; clamp to 1 if 0)
+                // Delta IL offset must be > 0 for non-hidden points — skip duplicates
                 var deltaIl = pt.IlOffset - points[i - 1].IlOffset;
-                if (deltaIl <= 0) deltaIl = 0;
+                if (deltaIl <= 0) continue; // Skip duplicate IL offsets (invalid per PDB spec)
                 builder.WriteCompressedInteger(deltaIl);
             }
 

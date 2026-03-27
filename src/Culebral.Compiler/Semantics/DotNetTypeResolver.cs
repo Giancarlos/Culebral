@@ -162,8 +162,10 @@ public sealed class DotNetTypeResolver
     /// </summary>
     public static string SnakeToPascal(string snake)
     {
+        if (snake.Length == 0) return snake;
+
         // Already PascalCase: no underscores and starts with uppercase
-        if (!snake.Contains('_') && snake.Length > 0 && char.IsUpper(snake[0]))
+        if (!snake.Contains('_') && char.IsUpper(snake[0]))
             return snake;
 
         // No underscores but starts lowercase: just capitalize first letter

@@ -286,12 +286,22 @@ public sealed class TypeChecker
         // Inherit fields from base classes
         foreach (var baseType in cls.Bases)
         {
-            if (baseType is SimpleType baseSt && _classFields.TryGetValue(baseSt.Name, out var baseFields))
+            if (baseType is SimpleType baseSt)
             {
-                foreach (var baseSym in baseFields)
+                var baseLookup = _currentScope.Lookup(baseSt.Name);
+                if (baseLookup is null && !_classFields.ContainsKey(baseSt.Name))
                 {
-                    classScope.TryDeclare(baseSym);
-                    ownFields.Add(baseSym);
+                    _diagnostics.Error("LEB2023",
+                        $"Base class '{baseSt.Name}' is not defined",
+                        baseType.Span);
+                }
+                if (_classFields.TryGetValue(baseSt.Name, out var baseFields))
+                {
+                    foreach (var baseSym in baseFields)
+                    {
+                        classScope.TryDeclare(baseSym);
+                        ownFields.Add(baseSym);
+                    }
                 }
             }
         }
@@ -307,8 +317,17 @@ public sealed class TypeChecker
                     CheckFunction(method);
                     break;
                 case FieldDeclaration field when field.Default is not null:
-                    InferType(field.Default);
+                {
+                    var defaultType = InferType(field.Default);
+                    var fieldType = ResolveTypeAnnotation(field.Type);
+                    if (!IsAssignable(defaultType, fieldType))
+                    {
+                        _diagnostics.Error("LEB2022",
+                            $"Cannot assign {defaultType.DisplayName} default to field '{field.Name}' of type {fieldType.DisplayName}",
+                            field.Span);
+                    }
                     break;
+                }
             }
         }
 

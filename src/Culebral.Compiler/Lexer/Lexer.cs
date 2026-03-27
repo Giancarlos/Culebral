@@ -281,18 +281,58 @@ public sealed class CulebralLexer
                 Advance();
                 if (_pos < _source.Length)
                 {
-                    sb.Append(Current switch
+                    if (Current == 'x' && _pos + 2 < _source.Length)
                     {
-                        'n' => '\n',
-                        't' => '\t',
-                        'r' => '\r',
-                        '\\' => '\\',
-                        '\'' => '\'',
-                        '"' => '"',
-                        '0' => '\0',
-                        _ => Current,
-                    });
-                    Advance();
+                        // \xNN — 2 hex digits
+                        Advance();
+                        var hex = _source.Substring(_pos, Math.Min(2, _source.Length - _pos));
+                        if (hex.Length == 2 && int.TryParse(hex, System.Globalization.NumberStyles.HexNumber, null, out var hexVal))
+                        {
+                            sb.Append((char)hexVal);
+                            Advance();
+                            Advance();
+                        }
+                        else
+                        {
+                            sb.Append('\\');
+                            sb.Append('x');
+                        }
+                    }
+                    else if (Current == 'u' && _pos + 4 < _source.Length)
+                    {
+                        // \uNNNN — 4 hex digits
+                        Advance();
+                        var hex = _source.Substring(_pos, Math.Min(4, _source.Length - _pos));
+                        if (hex.Length == 4 && int.TryParse(hex, System.Globalization.NumberStyles.HexNumber, null, out var hexVal))
+                        {
+                            sb.Append((char)hexVal);
+                            Advance(); Advance(); Advance(); Advance();
+                        }
+                        else
+                        {
+                            sb.Append('\\');
+                            sb.Append('u');
+                        }
+                    }
+                    else
+                    {
+                        sb.Append(Current switch
+                        {
+                            'n' => '\n',
+                            't' => '\t',
+                            'r' => '\r',
+                            '\\' => '\\',
+                            '\'' => '\'',
+                            '"' => '"',
+                            '0' => '\0',
+                            'a' => '\a',
+                            'b' => '\b',
+                            'f' => '\f',
+                            'v' => '\v',
+                            _ => Current,
+                        });
+                        Advance();
+                    }
                 }
             }
             else if (!isTriple && (Current == '\n' || Current == '\r'))
@@ -413,7 +453,7 @@ public sealed class CulebralLexer
         }
 
         var text = _source[startPos.._pos];
-        var cleanText = text.Replace("_", "");
+        var cleanText = text.Contains('_') ? text.Replace("_", "") : text;
         var span = new SourceSpan(start, CurrentLocation());
 
         if (isFloat)
