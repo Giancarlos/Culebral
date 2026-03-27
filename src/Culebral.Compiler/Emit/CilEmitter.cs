@@ -3622,6 +3622,16 @@ public sealed class CilEmitter
                 // Dictionary<object, object>.Add(key, value)
                 il.Emit(OpCodes.Callvirt, typeof(Dictionary<object, object>).GetMethod("Add")!);
                 return;
+            case "ContainsKey" when argc == 1:
+            {
+                // dict.ContainsKey(key) — need castclass since receiver is object
+                var ckKey = il.DeclareLocal(typeof(object));
+                il.Emit(OpCodes.Stloc, ckKey);
+                il.Emit(OpCodes.Castclass, typeof(Dictionary<object, object>));
+                il.Emit(OpCodes.Ldloc, ckKey);
+                il.Emit(OpCodes.Callvirt, typeof(Dictionary<object, object>).GetMethod("ContainsKey")!);
+                return;
+            }
             case "Add" when argc == 1:
             {
                 // Could be List<object>.Add or HashSet<object>.Add — infer from context
@@ -3760,6 +3770,163 @@ public sealed class CilEmitter
             return;
         }
 
+        // ── list.append(x) → IList.Add(object) — returns int index (caller handles discard) ──
+        if (name == "append" && argc == 1)
+        {
+            // Stack: [list(object), value(???)]
+            if (instr is not null && func is not null)
+            {
+                var argType = InferStackTopType(instr, func);
+                if (argType.IsValueType)
+                    il.Emit(OpCodes.Box, argType);
+            }
+            var appArg = il.DeclareLocal(typeof(object));
+            il.Emit(OpCodes.Stloc, appArg);
+            il.Emit(OpCodes.Castclass, typeof(System.Collections.IList));
+            il.Emit(OpCodes.Ldloc, appArg);
+            il.Emit(OpCodes.Callvirt, typeof(System.Collections.IList).GetMethod("Add", [typeof(object)])!);
+            // IList.Add returns int — box it so the IrPop can discard a reference
+            il.Emit(OpCodes.Box, typeof(int));
+            return;
+        }
+
+        // ── list.pop() → RemoveAt(Count-1) and return the removed element ──
+        if (name == "pop" && argc == 0)
+        {
+            // Stack: [list]
+            var popList = il.DeclareLocal(typeof(List<object>));
+            il.Emit(OpCodes.Castclass, typeof(List<object>));
+            il.Emit(OpCodes.Stloc, popList);
+            // Get last element
+            il.Emit(OpCodes.Ldloc, popList);
+            il.Emit(OpCodes.Ldloc, popList);
+            il.Emit(OpCodes.Callvirt, typeof(List<object>).GetProperty("Count")!.GetGetMethod()!);
+            il.Emit(OpCodes.Ldc_I4_1);
+            il.Emit(OpCodes.Sub);
+            il.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("get_Item", [typeof(int)])!);
+            // Remove last element
+            var popVal = il.DeclareLocal(typeof(object));
+            il.Emit(OpCodes.Stloc, popVal);
+            il.Emit(OpCodes.Ldloc, popList);
+            il.Emit(OpCodes.Ldloc, popList);
+            il.Emit(OpCodes.Callvirt, typeof(List<object>).GetProperty("Count")!.GetGetMethod()!);
+            il.Emit(OpCodes.Ldc_I4_1);
+            il.Emit(OpCodes.Sub);
+            il.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("RemoveAt", [typeof(int)])!);
+            il.Emit(OpCodes.Ldloc, popVal);
+            return;
+        }
+
+        // ── list.insert(i, x) → List<object>.Insert(i, x) ──
+        if (name == "insert" && argc == 2)
+        {
+            il.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("Insert", [typeof(int), typeof(object)])!);
+            return;
+        }
+
+        // ── list.clear() / dict.clear() / set.clear() ──
+        if (name == "clear" && argc == 0)
+        {
+            // ICollection<object>.Clear() works for List, Dict, HashSet
+            il.Emit(OpCodes.Callvirt, typeof(System.Collections.IList).GetMethod("Clear")!);
+            return;
+        }
+
+        // ── list.copy() → new List<object>(original) ──
+        if (name == "copy" && argc == 0)
+        {
+            il.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+            EmitListFromEnumerableHelper(il);
+            return;
+        }
+
+        // ── dict.keys() → Dictionary.Keys property ──
+        if (name == "keys" && argc == 0)
+        {
+            il.Emit(OpCodes.Castclass, typeof(Dictionary<object, object>));
+            il.Emit(OpCodes.Callvirt, typeof(Dictionary<object, object>).GetProperty("Keys")!.GetGetMethod()!);
+            return;
+        }
+
+        // ── dict.values() → Dictionary.Values property ──
+        if (name == "values" && argc == 0)
+        {
+            il.Emit(OpCodes.Castclass, typeof(Dictionary<object, object>));
+            il.Emit(OpCodes.Callvirt, typeof(Dictionary<object, object>).GetProperty("Values")!.GetGetMethod()!);
+            return;
+        }
+
+        // ── dict.items() → materialize to list of (key, value) tuples ──
+        if (name == "items" && argc == 0)
+        {
+            // Iterate dict, create list of object[] tuples
+            il.Emit(OpCodes.Castclass, typeof(Dictionary<object, object>));
+            var dictLocal = il.DeclareLocal(typeof(Dictionary<object, object>));
+            il.Emit(OpCodes.Stloc, dictLocal);
+            il.Emit(OpCodes.Newobj, typeof(List<object>).GetConstructor(Type.EmptyTypes)!);
+            var itemsList = il.DeclareLocal(typeof(List<object>));
+            il.Emit(OpCodes.Stloc, itemsList);
+            // foreach (var kv in dict) { itemsList.Add(new object[] { kv.Key, kv.Value }); }
+            il.Emit(OpCodes.Ldloc, dictLocal);
+            il.Emit(OpCodes.Callvirt, typeof(Dictionary<object, object>).GetMethod("GetEnumerator")!);
+            var enumLocal = il.DeclareLocal(typeof(Dictionary<object, object>.Enumerator));
+            il.Emit(OpCodes.Stloc, enumLocal);
+            var itemsCond = il.DefineLabel();
+            var itemsBody = il.DefineLabel();
+            var itemsEnd = il.DefineLabel();
+            il.Emit(OpCodes.Br, itemsCond);
+            il.MarkLabel(itemsBody);
+            il.Emit(OpCodes.Ldloc, itemsList);
+            // Create tuple: new object[] { key, value }
+            il.Emit(OpCodes.Ldc_I4_2);
+            il.Emit(OpCodes.Newarr, typeof(object));
+            il.Emit(OpCodes.Dup);
+            il.Emit(OpCodes.Ldc_I4_0);
+            il.Emit(OpCodes.Ldloca, enumLocal);
+            il.Emit(OpCodes.Call, typeof(Dictionary<object, object>.Enumerator).GetProperty("Current")!.GetGetMethod()!);
+            var kvLocal = il.DeclareLocal(typeof(KeyValuePair<object, object>));
+            il.Emit(OpCodes.Stloc, kvLocal);
+            il.Emit(OpCodes.Ldloca, kvLocal);
+            il.Emit(OpCodes.Call, typeof(KeyValuePair<object, object>).GetProperty("Key")!.GetGetMethod()!);
+            il.Emit(OpCodes.Stelem_Ref);
+            il.Emit(OpCodes.Dup);
+            il.Emit(OpCodes.Ldc_I4_1);
+            il.Emit(OpCodes.Ldloca, kvLocal);
+            il.Emit(OpCodes.Call, typeof(KeyValuePair<object, object>).GetProperty("Value")!.GetGetMethod()!);
+            il.Emit(OpCodes.Stelem_Ref);
+            il.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("Add", [typeof(object)])!);
+            il.MarkLabel(itemsCond);
+            il.Emit(OpCodes.Ldloca, enumLocal);
+            il.Emit(OpCodes.Call, typeof(Dictionary<object, object>.Enumerator).GetMethod("MoveNext")!);
+            il.Emit(OpCodes.Brtrue, itemsBody);
+            il.MarkLabel(itemsEnd);
+            il.Emit(OpCodes.Ldloc, itemsList);
+            return;
+        }
+
+        // ── dict.pop(key) → remove and return value ──
+        if (name == "pop" && argc == 1)
+        {
+            // Stack: [dict, key]. TryGetValue + Remove
+            var popKey = il.DeclareLocal(typeof(object));
+            il.Emit(OpCodes.Stloc, popKey);
+            il.Emit(OpCodes.Castclass, typeof(Dictionary<object, object>));
+            var popDict = il.DeclareLocal(typeof(Dictionary<object, object>));
+            il.Emit(OpCodes.Stloc, popDict);
+            var popOut = il.DeclareLocal(typeof(object));
+            il.Emit(OpCodes.Ldloc, popDict);
+            il.Emit(OpCodes.Ldloc, popKey);
+            il.Emit(OpCodes.Ldloca, popOut);
+            il.Emit(OpCodes.Callvirt, typeof(Dictionary<object, object>).GetMethod("TryGetValue")!);
+            il.Emit(OpCodes.Pop); // discard bool
+            il.Emit(OpCodes.Ldloc, popDict);
+            il.Emit(OpCodes.Ldloc, popKey);
+            il.Emit(OpCodes.Callvirt, typeof(Dictionary<object, object>).GetMethod("Remove", [typeof(object)])!);
+            il.Emit(OpCodes.Pop); // discard bool
+            il.Emit(OpCodes.Ldloc, popOut);
+            return;
+        }
+
         // ── dict.get(key) and dict.get(key, default) ──
         if (name == "get" && argc is 1 or 2)
         {
@@ -3814,13 +3981,15 @@ public sealed class CilEmitter
             }
         }
 
-        // Last resort: pop everything and push null — method not found
+        // Last resort: method not found — emit runtime error instead of silent null
         _diagnostics.Warning("LEB4004",
-            $"Cannot resolve virtual method '{resolvedName}' with {argc} argument(s) — returning null",
+            $"Cannot resolve method '{resolvedName}' with {argc} argument(s)",
             SourceSpan.None);
         for (int i = 0; i < argc + 1; i++)
             il.Emit(OpCodes.Pop);
-        il.Emit(OpCodes.Ldnull);
+        il.Emit(OpCodes.Ldstr, $"Method '{name}' not found");
+        il.Emit(OpCodes.Newobj, typeof(MissingMethodException).GetConstructor([typeof(string)])!);
+        il.Emit(OpCodes.Throw);
     }
 
     private void EmitMethodCall(ILGenerator il, string declaringType, string methodName, int argc)

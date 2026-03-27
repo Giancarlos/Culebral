@@ -872,7 +872,22 @@ public sealed class CulebralParser
         Advance();
         Expression? value = null;
         if (Current.Kind != TokenKind.Newline && Current.Kind != TokenKind.EndOfFile && Current.Kind != TokenKind.Dedent)
+        {
             value = ParseExpression();
+            // Implicit tuple: return a, b → return (a, b)
+            if (Current.Kind == TokenKind.Comma)
+            {
+                var elements = new List<Expression> { value };
+                while (TryConsume(TokenKind.Comma))
+                {
+                    if (Current.Kind is TokenKind.Newline or TokenKind.EndOfFile or TokenKind.Dedent)
+                        break;
+                    elements.Add(ParseExpression());
+                }
+                value = new TupleExpr(elements,
+                    new SourceSpan(elements[0].Span.Start, elements[^1].Span.End));
+            }
+        }
         return new ReturnStatement(value, new SourceSpan(start, CurrentLocation()));
     }
 

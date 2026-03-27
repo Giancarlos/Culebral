@@ -3028,6 +3028,11 @@ public sealed class IrLowering
         {
             _currentBlock.Emit(new IrCallMethod(collTypeName, "Contains", 1, inExpr.Span));
         }
+        else if (collType is GenericInstanceType { Name: "dict" })
+        {
+            // Dict: x in d → d.ContainsKey(x)
+            _currentBlock.Emit(new IrCallVirtual("ContainsKey", 1, inExpr.Span));
+        }
         else
         {
             _currentBlock.Emit(new IrCallVirtual("Contains", 1, inExpr.Span));

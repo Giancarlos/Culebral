@@ -4854,4 +4854,115 @@ public class EmitTests : IDisposable
             """);
         Assert.Equal("hello", output);
     }
+
+    // ─── Day-One Python Patterns ───
+
+    [Fact]
+    public void List_Append_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = [1, 2, 3]
+                items.append(4)
+                print(len(items))
+            """);
+        Assert.Equal("4", output);
+    }
+
+    [Fact]
+    public void List_Pop_RemovesLast()
+    {
+        var output = CompileAndRun("""
+            def main():
+                items = [1, 2, 3]
+                items.pop()
+                print(len(items))
+            """);
+        Assert.Equal("2", output);
+    }
+
+    [Fact]
+    public void Dict_KeyIn_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                d = {"a": 1, "b": 2}
+                if "a" in d:
+                    print("found")
+                else:
+                    print("missing")
+            """);
+        Assert.Equal("found", output);
+    }
+
+    [Fact]
+    public void Dict_KeyNotIn_Works()
+    {
+        var output = CompileAndRun("""
+            def main():
+                d = {"a": 1}
+                if "z" in d:
+                    print("found")
+                else:
+                    print("missing")
+            """);
+        Assert.Equal("missing", output);
+    }
+
+    [Fact]
+    public void Dict_Keys_Iterable()
+    {
+        var output = CompileAndRun("""
+            def main():
+                d = {"x": 1, "y": 2}
+                count = 0
+                for k in d.keys():
+                    count = count + 1
+                print(count)
+            """);
+        Assert.Equal("2", output);
+    }
+
+    [Fact]
+    public void Dict_Values_Iterable()
+    {
+        var output = CompileAndRun("""
+            def main():
+                d = {"a": 10, "b": 20}
+                for v in d.values():
+                    print(v)
+            """);
+        Assert.Equal("10\n20", output);
+    }
+
+    [Fact]
+    public void Return_ImplicitTuple_WithReturnType()
+    {
+        // Implicit tuple return with explicit return type annotation
+        var output = CompileAndRun("""
+            def get_pair() -> object:
+                return "hello", "world"
+
+            def main():
+                a, b = get_pair()
+                print(a)
+                print(b)
+            """);
+        Assert.Equal("hello\nworld", output);
+    }
+
+    [Fact]
+    public void UnresolvedMethod_ThrowsAtRuntime()
+    {
+        // Calling a non-existent method should throw MissingMethodException, not silently return null
+        var output = CompileAndRun("""
+            def main():
+                items = [1, 2, 3]
+                try:
+                    items.nonexistent_method()
+                except Exception:
+                    print("caught")
+            """);
+        Assert.Equal("caught", output);
+    }
 }
