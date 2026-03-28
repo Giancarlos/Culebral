@@ -5688,6 +5688,86 @@ public sealed class CilEmitter
         return typeof(object);
     }
 
+    // ─── In-Memory Emission ───
+
+    /// <summary>
+    /// Emit the module to in-memory byte arrays instead of disk files.
+    /// Returns (assemblyBytes, pdbBytes).
+    /// </summary>
+    public (byte[] Assembly, byte[]? Pdb) EmitToMemory(IrModule module)
+    {
+        try
+        {
+            _sourcePath = module.SourcePath != null ? Path.GetFullPath(module.SourcePath) : "<script>";
+            InitializeAssembly(module.Name);
+            EmitTypes(module);
+            EmitFunctions(module);
+            return SerializeToBytes();
+        }
+        catch (Exception ex)
+        {
+            _diagnostics.Error("LEB4000", $"CIL emission failed: {ex.Message}", SourceSpan.None);
+            return (Array.Empty<byte>(), null);
+        }
+    }
+
+    private (byte[] Assembly, byte[]? Pdb) SerializeToBytes()
+    {
+        var metadataBuilder = _assemblyBuilder.GenerateMetadata(
+            out var ilStream,
+            out var fieldData);
+
+        var peHeaderBuilder = _entryPointMethod is not null
+            ? PEHeaderBuilder.CreateExecutableHeader()
+            : PEHeaderBuilder.CreateLibraryHeader();
+
+        var entryPointHandle = _entryPointMethod is not null
+            ? MetadataTokens.MethodDefinitionHandle(
+                _entryPointMethod.MetadataToken)
+            : default;
+
+        // Build portable PDB debug information
+        var pdbBuilder = BuildPortablePdb(metadataBuilder);
+        BlobContentId pdbContentId = default;
+        DebugDirectoryBuilder? debugDirBuilder = null;
+        byte[]? pdbBytes = null;
+
+        if (pdbBuilder is not null)
+        {
+            // Serialize the PDB to get its content ID and bytes
+            var pdbBlob = new BlobBuilder();
+            pdbContentId = pdbBuilder.Serialize(pdbBlob);
+
+            // Capture PDB bytes in memory
+            using var pdbStream = new MemoryStream();
+            pdbBlob.WriteContentTo(pdbStream);
+            pdbBytes = pdbStream.ToArray();
+
+            // Create a debug directory entry that links the PE to the PDB
+            debugDirBuilder = new DebugDirectoryBuilder();
+            debugDirBuilder.AddCodeViewEntry(
+                pdbPath: "<in-memory>.pdb",
+                pdbContentId: pdbContentId,
+                portablePdbVersion: 0x0100);
+        }
+
+        var peBuilder = new ManagedPEBuilder(
+            header: peHeaderBuilder,
+            metadataRootBuilder: new MetadataRootBuilder(metadataBuilder),
+            ilStream: ilStream,
+            mappedFieldData: fieldData,
+            entryPoint: entryPointHandle,
+            debugDirectoryBuilder: debugDirBuilder);
+
+        var blobBuilder = new BlobBuilder();
+        peBuilder.Serialize(blobBuilder);
+
+        using var peStream = new MemoryStream();
+        blobBuilder.WriteContentTo(peStream);
+
+        return (peStream.ToArray(), pdbBytes);
+    }
+
     // ─── Assembly Save ───
 
     private void SaveAssembly(IrModule module)

@@ -51,15 +51,7 @@ public sealed class CulebralEngine : IDisposable
     public string Execute(string source)
     {
         var injected = InjectFunctions(InjectGlobals(source));
-        var (success, output, errors) = Culebral.Compiler.Program.ExecuteSource(injected);
-        if (!success)
-        {
-            throw new CulebralScriptException(
-                string.IsNullOrWhiteSpace(errors)
-                    ? "Script execution failed."
-                    : errors.TrimEnd());
-        }
-        return output;
+        return CulebralScript.Execute(injected);
     }
 
     /// <summary>

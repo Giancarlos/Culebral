@@ -1,3 +1,4 @@
+using Culebral.Compiler.Diagnostics;
 using Culebral.Scripting;
 
 namespace Culebral.Compiler.Tests;
@@ -240,5 +241,128 @@ public class ScriptingTests : IDisposable
         // With no globals set, Execute should work exactly as before
         var output = _engine.Execute("def main():\n    print(\"plain\")");
         Assert.Equal("plain", output.Trim());
+    }
+}
+
+// ─── CulebralScript Static API Tests (Phases 1–3) ───
+
+/// <summary>
+/// Tests for the new in-process scripting API: CulebralScript.Evaluate, Execute, and CulebralScript&lt;T&gt;.
+/// </summary>
+public class CulebralScriptApiTests
+{
+    [Fact]
+    public void Evaluate_IntExpression()
+    {
+        var result = CulebralScript.Evaluate<int>("print(2 + 2)");
+        Assert.Equal(4, result);
+    }
+
+    [Fact]
+    public void Evaluate_StringExpression()
+    {
+        var result = CulebralScript.Evaluate<string>("print(\"hello\")");
+        Assert.Equal("hello", result);
+    }
+
+    [Fact]
+    public void Execute_ReturnsOutput()
+    {
+        var output = CulebralScript.Execute("print(\"test\")");
+        Assert.Contains("test", output);
+    }
+
+    [Fact]
+    public void Execute_WithExistingMain_PassesThrough()
+    {
+        var output = CulebralScript.Execute("def main():\n    print(\"via main\")");
+        Assert.Contains("via main", output);
+    }
+
+    [Fact]
+    public void CompilationError_ThrowsWithDiagnostics()
+    {
+        var ex = Assert.Throws<CulebralScriptException>(() =>
+            CulebralScript.Evaluate<int>("definitely not valid culebral!!!"));
+        Assert.Contains("Compilation failed", ex.Message);
+    }
+
+    // ─── CulebralScript<T> Create/Run/CreateDelegate Tests (Phases 4–6) ───
+
+    [Fact]
+    public void Create_ValidCode_IsCompiled()
+    {
+        var script = CulebralScript<string>.Create("print(\"cached\")");
+        Assert.True(script.IsCompiled);
+        script.Dispose();
+    }
+
+    [Fact]
+    public void Create_InvalidCode_HasDiagnostics()
+    {
+        var script = CulebralScript<string>.Create("this is not valid!!!");
+        Assert.False(script.IsCompiled);
+        Assert.NotEmpty(script.Diagnostics);
+        Assert.Contains(script.Diagnostics, d => d.Severity == DiagnosticSeverity.Error);
+        script.Dispose();
+    }
+
+    [Fact]
+    public void Create_AndRun_ReturnsResult()
+    {
+        var script = CulebralScript<string>.Create("print(\"cached\")");
+        Assert.True(script.IsCompiled);
+        var r1 = script.Run();
+        var r2 = script.Run();
+        Assert.True(r1.Success);
+        Assert.True(r2.Success);
+        Assert.Equal("cached", r1.ReturnValue);
+        Assert.Equal("cached", r2.ReturnValue);
+        script.Dispose();
+    }
+
+    [Fact]
+    public void CreateDelegate_HotPath()
+    {
+        using var script = CulebralScript<string>.Create("print(\"fast\")");
+        var fn = script.CreateDelegate();
+        var result = fn();
+        Assert.Equal("fast", result);
+    }
+
+    [Fact]
+    public void CreateDelegate_MultipleInvocations()
+    {
+        using var script = CulebralScript<string>.Create("print(\"repeat\")");
+        var fn = script.CreateDelegate();
+        for (int i = 0; i < 5; i++)
+        {
+            var result = fn();
+            Assert.Equal("repeat", result);
+        }
+    }
+
+    [Fact]
+    public void Run_RuntimeError_CapturesException()
+    {
+        // Division by zero should cause a runtime error
+        var script = CulebralScript<string>.Create("print(1 // 0)");
+        if (script.IsCompiled)
+        {
+            var result = script.Run();
+            Assert.False(result.Success);
+            Assert.NotNull(result.Exception);
+        }
+        script.Dispose();
+    }
+
+    [Fact]
+    public void ScriptResult_Success_Property()
+    {
+        using var script = CulebralScript<string>.Create("print(\"ok\")");
+        var result = script.Run();
+        Assert.True(result.Success);
+        Assert.Null(result.Exception);
+        Assert.Equal("ok", result.ReturnValue);
     }
 }
