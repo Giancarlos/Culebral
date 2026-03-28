@@ -365,4 +365,67 @@ public class CulebralScriptApiTests
         Assert.Null(result.Exception);
         Assert.Equal("ok", result.ReturnValue);
     }
+
+    // ─── REPL State Chaining Tests ───
+
+    [Fact]
+    public void Run_ReturnsScriptState()
+    {
+        var state = CulebralScript.Run<string>("print(\"hello\")");
+        Assert.True(state.Success);
+        Assert.Equal("hello", state.ReturnValue);
+    }
+
+    [Fact]
+    public void ContinueWith_AppendCode()
+    {
+        // First: define x
+        var state1 = CulebralScript.Run<string>("x = 10\nprint(x)");
+        Assert.Equal("10", state1.ReturnValue);
+
+        // Continue: use x in new expression. Output includes BOTH prints (re-execution of all code)
+        var state2 = state1.ContinueWith<string>("y = x + 20\nprint(y)");
+        Assert.Contains("30", state2.Output);
+    }
+
+    [Fact]
+    public void ContinueWith_PreservesVariables()
+    {
+        // Variables from prior states are visible in continuations
+        var s1 = CulebralScript.Run<string>("x = 42");
+        var s2 = s1.ContinueWith<string>("print(x)");
+        Assert.Contains("42", s2.Output);
+    }
+
+    // ─── Options Tests ───
+
+    [Fact]
+    public void Options_Default_NoTimeout()
+    {
+        var opts = CulebralScriptOptions.Default;
+        Assert.Null(opts.Timeout);
+        Assert.True(opts.AllowFileSystemAccess);
+        Assert.True(opts.AllowNetworkAccess);
+    }
+
+    [Fact]
+    public void Options_WithTimeout_Immutable()
+    {
+        var opts1 = CulebralScriptOptions.Default;
+        var opts2 = opts1.WithTimeout(TimeSpan.FromSeconds(5));
+        Assert.Null(opts1.Timeout); // original unchanged
+        Assert.Equal(TimeSpan.FromSeconds(5), opts2.Timeout);
+    }
+
+    [Fact]
+    public void Options_Chaining()
+    {
+        var opts = CulebralScriptOptions.Default
+            .WithTimeout(TimeSpan.FromSeconds(10))
+            .WithFileSystemAccess(false)
+            .WithNetworkAccess(false);
+        Assert.Equal(TimeSpan.FromSeconds(10), opts.Timeout);
+        Assert.False(opts.AllowFileSystemAccess);
+        Assert.False(opts.AllowNetworkAccess);
+    }
 }

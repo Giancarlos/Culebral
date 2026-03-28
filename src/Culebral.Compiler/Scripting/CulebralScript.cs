@@ -109,6 +109,22 @@ public static class CulebralScript
     }
 
     /// <summary>
+    /// Run code and return a ScriptState for REPL chaining.
+    /// </summary>
+    public static ScriptState<T> Run<T>(string code, object? globals = null)
+    {
+        var result = Execute(code, globals);
+        var trimmed = result.TrimEnd();
+        T returnValue = default!;
+        if (typeof(T) == typeof(string)) returnValue = (T)(object)trimmed;
+        else if (typeof(T) == typeof(object)) returnValue = (T)(object)trimmed;
+        else if (typeof(T) == typeof(int) && int.TryParse(trimmed, out var i)) returnValue = (T)(object)i;
+        else if (typeof(T) == typeof(double) && double.TryParse(trimmed, out var d)) returnValue = (T)(object)d;
+        else if (typeof(T) == typeof(bool) && bool.TryParse(trimmed, out var b)) returnValue = (T)(object)b;
+        return new ScriptState<T>(returnValue, result, null, code);
+    }
+
+    /// <summary>
     /// Wrap bare code in a <c>def main():</c> block if it doesn't already contain one.
     /// </summary>
     internal static string WrapAsScript(string code)

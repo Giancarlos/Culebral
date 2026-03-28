@@ -19,7 +19,7 @@ public sealed class CulebralEngine : IDisposable
 {
     private readonly Dictionary<string, object?> _globals = new();
     private readonly Dictionary<string, Delegate> _functions = new();
-    private string? _tempDir = null;
+    // No temp files needed — execution is fully in-process via CulebralScript API
 
     // ─── Global Variables (Host → Script) ───
 
@@ -203,10 +203,7 @@ public sealed class CulebralEngine : IDisposable
 
     public void Dispose()
     {
-        if (_tempDir is not null && Directory.Exists(_tempDir))
-        {
-            try { Directory.Delete(_tempDir, true); } catch { }
-        }
+        // No resources to clean up — all execution is in-memory
     }
 }
 
