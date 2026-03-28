@@ -225,8 +225,10 @@ public sealed record IrCallDotNetGenericInstance(Type DeclaringType, string Meth
 // Extension method calls — static methods called with receiver as first argument
 public sealed record IrCallExtensionMethod(Type DeclaringType, string MethodName, int ArgCount, Type[]? TypeArguments, SourceSpan Span) : IrInstruction(Span);
 
-// Lambda / delegate creation — creates a delegate pointing to a generated static method
-public sealed record IrCreateDelegate(string MethodName, int ParamCount, SourceSpan Span) : IrInstruction(Span);
+// Lambda / delegate creation — creates a delegate pointing to a static or instance method.
+// When DeclaringType is non-null, the method is an instance method on a closure class
+// and the closure instance must already be on the stack.
+public sealed record IrCreateDelegate(string MethodName, int ParamCount, SourceSpan Span, string? DeclaringType = null) : IrInstruction(Span);
 
 // Delegate invocation — stack has: [delegate, arg0, arg1, ..., argN]
 public sealed record IrInvokeDelegate(int ArgCount, SourceSpan Span) : IrInstruction(Span);

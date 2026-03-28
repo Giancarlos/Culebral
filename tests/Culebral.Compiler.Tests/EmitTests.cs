@@ -1707,6 +1707,57 @@ public class EmitTests : IDisposable
         Assert.Equal("10", output);
     }
 
+    [Fact]
+    public void Lambda_CapturesOuterVariable()
+    {
+        var output = CompileAndRun("""
+            def main():
+                x = 42
+                f = lambda: x
+                print(f())
+            """);
+        Assert.Equal("42", output);
+    }
+
+    [Fact]
+    public void Lambda_CapturesMultipleVariables()
+    {
+        var output = CompileAndRun("""
+            def main():
+                a = 10
+                b = 20
+                f = lambda: a + b
+                print(f())
+            """);
+        Assert.Equal("30", output);
+    }
+
+    [Fact]
+    public void Lambda_CapturesWithParameter()
+    {
+        var output = CompileAndRun("""
+            def main():
+                offset = 100
+                add_offset = lambda x: x + offset
+                print(add_offset(5))
+            """);
+        Assert.Equal("105", output);
+    }
+
+    [Fact]
+    public void FunctionReference_AsDelegate()
+    {
+        var output = CompileAndRun("""
+            def greet() -> str:
+                return "hello"
+
+            def main():
+                f = greet
+                print(f())
+            """);
+        Assert.Equal("hello", output);
+    }
+
     // ─── Phase 4 Batch 2: Slicing ───
 
     [Fact]
@@ -3699,6 +3750,18 @@ public class EmitTests : IDisposable
             """);
         // d3 has keys "a" (from d2, overwritten), "b" (from d1) → 2 entries
         Assert.Equal("2", output);
+    }
+
+    [Fact]
+    public void Dict_FromIterableOfPairs()
+    {
+        var output = CompileAndRun("""
+            def main():
+                pairs = [("a", 1), ("b", 2), ("c", 3)]
+                d = dict(pairs)
+                print(len(d))
+            """);
+        Assert.Equal("3", output);
     }
 
     // ─── Negative Exponent Float Promotion ───

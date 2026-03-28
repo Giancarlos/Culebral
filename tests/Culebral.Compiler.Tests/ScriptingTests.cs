@@ -428,4 +428,64 @@ public class CulebralScriptApiTests
         Assert.False(opts.AllowFileSystemAccess);
         Assert.False(opts.AllowNetworkAccess);
     }
+
+    // ─── Lambda Closure Tests ───
+
+    [Fact]
+    public void Lambda_CapturesOuterVariable()
+    {
+        var output = CulebralScript.Execute("""
+            x = 42
+            f = lambda: x
+            print(f())
+            """);
+        Assert.Contains("42", output);
+    }
+
+    [Fact]
+    public void Lambda_CapturesMultipleVariables()
+    {
+        var output = CulebralScript.Execute("""
+            a = 10
+            b = 20
+            f = lambda: a + b
+            print(f())
+            """);
+        Assert.Contains("30", output);
+    }
+
+    [Fact]
+    public void FunctionReference_AsDelegate()
+    {
+        var output = CulebralScript.Execute("""
+            def greet() -> str:
+                return "hello"
+            def main():
+                f = greet
+                print(f())
+            """);
+        Assert.Contains("hello", output);
+    }
+
+    // ─── Timeout Tests ───
+
+    [Fact]
+    public void Execute_WithTimeout_CompletesNormally()
+    {
+        var opts = CulebralScriptOptions.Default.WithTimeout(TimeSpan.FromSeconds(5));
+        var output = CulebralScript.Execute("print(\"ok\")", options: opts);
+        Assert.Contains("ok", output);
+    }
+
+    [Fact]
+    public void Execute_WithTimeout_ThrowsOnExceed()
+    {
+        var opts = CulebralScriptOptions.Default.WithTimeout(TimeSpan.FromMilliseconds(100));
+        Assert.Throws<TimeoutException>(() =>
+            CulebralScript.Execute("""
+                x = 0
+                while True:
+                    x = x + 1
+                """, options: opts));
+    }
 }

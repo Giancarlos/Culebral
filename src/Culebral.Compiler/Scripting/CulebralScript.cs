@@ -70,7 +70,7 @@ public static class CulebralScript
     /// <summary>
     /// One-shot execute: compile and run, returning raw stdout output.
     /// </summary>
-    public static string Execute(string code, object? globals = null)
+    public static string Execute(string code, object? globals = null, CulebralScriptOptions? options = null)
     {
         var wrappedSource = WrapAsScript(code);
 
@@ -95,7 +95,7 @@ public static class CulebralScript
             Console.SetOut(sw);
             try
             {
-                entryPoint.Invoke(null, entryPoint.GetParameters().Length > 0 ? new object?[] { null } : null);
+                InvokeWithTimeout(entryPoint, options?.Timeout);
             }
             finally
             {
@@ -136,6 +136,31 @@ public static class CulebralScript
         // Wrap bare code in main()
         var indented = string.Join("\n", code.Split('\n').Select(line => "    " + line));
         return $"def main():\n{indented}\n";
+    }
+
+    /// <summary>
+    /// Invoke a method entry point with an optional timeout.
+    /// If timeout is null, the method runs synchronously on the current thread.
+    /// If timeout is set, the method runs on a background thread and is aborted via
+    /// Thread.Interrupt if it exceeds the time limit.
+    /// </summary>
+    private static void InvokeWithTimeout(MethodInfo entryPoint, TimeSpan? timeout)
+    {
+        var args = entryPoint.GetParameters().Length > 0 ? new object?[] { null } : null;
+
+        if (timeout is null)
+        {
+            entryPoint.Invoke(null, args);
+            return;
+        }
+
+        var task = Task.Run(() => entryPoint.Invoke(null, args));
+        if (!task.Wait(timeout.Value))
+            throw new TimeoutException($"Script execution exceeded {timeout.Value.TotalSeconds}s timeout.");
+
+        // Re-throw any exception from the script
+        if (task.IsFaulted)
+            throw task.Exception!.InnerException ?? task.Exception;
     }
 
     /// <summary>

@@ -1076,7 +1076,7 @@ public sealed class CilEmitter
                 il.Emit(OpCodes.Ret);
                 break;
 
-            case IrReturn { HasValue: true }:
+            case IrReturn retInstr when retInstr.HasValue:
                 if (generatorListLocal is not null)
                 {
                     // In a generator, explicit "return value" is unusual — pop the value,
@@ -1093,6 +1093,18 @@ public sealed class CilEmitter
                     il.Emit(OpCodes.Call, typeof(System.Threading.Tasks.Task)
                         .GetMethod("FromResult")!
                         .MakeGenericMethod(typeof(object)));
+                }
+                else
+                {
+                    // Auto-box value types when returning as object (e.g., lambda closures
+                    // with type-erased return type)
+                    var retClrType = ResolveClrType(func.ReturnType);
+                    if (retClrType == typeof(object))
+                    {
+                        var stackType = InferStackTopType(retInstr, func);
+                        if (stackType.IsValueType)
+                            il.Emit(OpCodes.Box, stackType);
+                    }
                 }
                 il.Emit(OpCodes.Ret);
                 break;
@@ -1349,9 +1361,21 @@ public sealed class CilEmitter
 
             // ─── Lambda Delegate Creation ───
 
-            case IrCreateDelegate { MethodName: var mname, ParamCount: var paramCount }:
+            case IrCreateDelegate { MethodName: var mname, ParamCount: var paramCount, DeclaringType: var closureType }:
             {
-                if (_methodBuilders.TryGetValue(mname, out var lambdaMb))
+                // Resolve the method builder — either a top-level function or a type method
+                MethodBuilder? lambdaMb = null;
+                bool isClosureInstance = false;
+                if (closureType is not null && _methodBuilders.TryGetValue($"{closureType}.{mname}", out lambdaMb))
+                {
+                    isClosureInstance = true;
+                }
+                else if (_methodBuilders.TryGetValue(mname, out lambdaMb))
+                {
+                    isClosureInstance = false;
+                }
+
+                if (lambdaMb is not null)
                 {
                     // Build the Func<> delegate type using the lambda method's actual parameter
                     // and return types — this is critical for .NET interop (e.g., ASP.NET
@@ -1373,9 +1397,20 @@ public sealed class CilEmitter
                     };
 
                     var delegateCtor = delegateType.GetConstructor([typeof(object), typeof(nint)])!;
-                    il.Emit(OpCodes.Ldnull); // null target (static method)
-                    il.Emit(OpCodes.Ldftn, lambdaMb);
-                    il.Emit(OpCodes.Newobj, delegateCtor);
+
+                    if (isClosureInstance)
+                    {
+                        // Closure instance is already on the stack (from IrNewObj + field population).
+                        // Create an instance delegate: target = closure instance, method = instance method.
+                        il.Emit(OpCodes.Ldftn, lambdaMb);
+                        il.Emit(OpCodes.Newobj, delegateCtor);
+                    }
+                    else
+                    {
+                        il.Emit(OpCodes.Ldnull); // null target (static method)
+                        il.Emit(OpCodes.Ldftn, lambdaMb);
+                        il.Emit(OpCodes.Newobj, delegateCtor);
+                    }
                 }
                 else
                 {
@@ -3294,11 +3329,17 @@ public sealed class CilEmitter
 
             case "dict":
             {
-                // dict() → new Dictionary<object, object>()
-                // Pop any args if passed (dict(iterable) not yet supported)
-                for (int i = 0; i < argc; i++)
-                    il.Emit(OpCodes.Pop);
-                il.Emit(OpCodes.Newobj, typeof(Dictionary<object, object>).GetConstructor(Type.EmptyTypes)!);
+                if (argc == 0)
+                {
+                    // dict() → new Dictionary<object, object>()
+                    il.Emit(OpCodes.Newobj, typeof(Dictionary<object, object>).GetConstructor(Type.EmptyTypes)!);
+                }
+                else
+                {
+                    // dict(iterable_of_pairs) → iterate and add key-value pairs.
+                    // Each pair is an object[] (Culebral tuple) of length >= 2.
+                    EmitDictFromIterableHelper(il);
+                }
                 break;
             }
 
@@ -5177,6 +5218,70 @@ public sealed class CilEmitter
     }
 
     /// <summary>
+    /// Emits dict(iterable_of_pairs) — creates a new Dictionary&lt;object, object&gt; from an iterable
+    /// of 2-element tuples (object[] pairs). Each pair's [0] is the key and [1] is the value.
+    /// </summary>
+    private void EmitDictFromIterableHelper(ILGenerator il)
+    {
+        if (!_methodBuilders.TryGetValue("<CulebralDictFromIterable>", out var helper))
+        {
+            if (_typeBuilders.TryGetValue("Program", out var programTb))
+            {
+                helper = programTb.DefineMethod("<CulebralDictFromIterable>",
+                    MethodAttributes.Public | MethodAttributes.Static,
+                    typeof(Dictionary<object, object>),
+                    [typeof(object)]);
+                helper.DefineParameter(1, ParameterAttributes.None, "source");
+                _methodBuilders["<CulebralDictFromIterable>"] = helper;
+
+                var hil = helper.GetILGenerator();
+                var resultLocal = hil.DeclareLocal(typeof(Dictionary<object, object>));
+                hil.Emit(OpCodes.Newobj, typeof(Dictionary<object, object>).GetConstructor(Type.EmptyTypes)!);
+                hil.Emit(OpCodes.Stloc, resultLocal);
+
+                var enumLocal = hil.DeclareLocal(typeof(System.Collections.IEnumerator));
+                hil.Emit(OpCodes.Ldarg_0);
+                hil.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerable).GetMethod("GetEnumerator")!);
+                hil.Emit(OpCodes.Stloc, enumLocal);
+
+                var pairLocal = hil.DeclareLocal(typeof(object[]));
+                var loopStart = hil.DefineLabel();
+                var loopEnd = hil.DefineLabel();
+
+                hil.MarkLabel(loopStart);
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
+                hil.Emit(OpCodes.Brfalse, loopEnd);
+
+                // Get current element and cast to object[] (tuple pair)
+                hil.Emit(OpCodes.Ldloc, enumLocal);
+                hil.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
+                hil.Emit(OpCodes.Castclass, typeof(object[]));
+                hil.Emit(OpCodes.Stloc, pairLocal);
+
+                // dict[pair[0]] = pair[1]
+                hil.Emit(OpCodes.Ldloc, resultLocal);
+                hil.Emit(OpCodes.Ldloc, pairLocal);
+                hil.Emit(OpCodes.Ldc_I4_0);
+                hil.Emit(OpCodes.Ldelem_Ref);
+                hil.Emit(OpCodes.Ldloc, pairLocal);
+                hil.Emit(OpCodes.Ldc_I4_1);
+                hil.Emit(OpCodes.Ldelem_Ref);
+                hil.Emit(OpCodes.Callvirt, typeof(Dictionary<object, object>).GetMethod("set_Item", [typeof(object), typeof(object)])!);
+
+                hil.Emit(OpCodes.Br, loopStart);
+                hil.MarkLabel(loopEnd);
+
+                hil.Emit(OpCodes.Ldloc, resultLocal);
+                hil.Emit(OpCodes.Ret);
+            }
+        }
+        if (helper is not null)
+            il.Emit(OpCodes.Call, helper);
+    }
+
+    /// <summary>
     /// Helper: Iterate an IEnumerable (from arg at argIndex) and add each element to a List&lt;object&gt;.
     /// Used by sorted, reversed, and list helpers.
     /// </summary>
@@ -5495,6 +5600,8 @@ public sealed class CilEmitter
             IrDictMerge => typeof(Dictionary<object, object>),
             IrListRepeat => typeof(List<object>),
             IrStringRepeat => typeof(string),
+            IrUnbox { Type: var unboxType } => ResolveClrType(unboxType),
+            IrBox => typeof(object),
             _ => typeof(object),
         };
     }

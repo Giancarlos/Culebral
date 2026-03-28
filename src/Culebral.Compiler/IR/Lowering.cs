@@ -2005,12 +2005,31 @@ public sealed class IrLowering
             {
                 _currentBlock.Emit(new IrLoadThis(ident.Span));
                 _currentBlock.Emit(new IrLoadField(_currentDeclaringType, ident.Name, ident.Span));
+
+                // For closure fields (typed as object due to type erasure), unbox if the type
+                // checker knows the original type is a value type. This ensures arithmetic and
+                // other value-type operations work correctly on captured variables.
+                if (field.Type == PrimitiveType.Object
+                    && _typeChecker.ResolvedTypes.TryGetValue(ident, out var resolvedType)
+                    && resolvedType is PrimitiveType pt && pt.ClrType is not null && pt.ClrType.IsValueType)
+                {
+                    _currentBlock.Emit(new IrUnbox(resolvedType, ident.Span));
+                }
+
                 return;
             }
         }
 
-        // Could be a function name or type — emit as a reference
-        _currentBlock.Emit(new IrLoadNull(ident.Span)); // Placeholder
+        // Check if it's a known function → create delegate reference
+        if (_functionDefs.ContainsKey(ident.Name))
+        {
+            _currentBlock.Emit(new IrCreateDelegate(ident.Name,
+                _functionDefs[ident.Name].Parameters.Count, ident.Span));
+            return;
+        }
+
+        // Unknown identifier — emit null placeholder
+        _currentBlock.Emit(new IrLoadNull(ident.Span));
     }
 
     /// <summary>
@@ -3340,7 +3359,7 @@ public sealed class IrLowering
     {
         if (_currentBlock is null || _currentFunction is null || _module is null) return;
 
-        var lambdaName = $"<lambda>_{_lambdaCounter++}";
+        var lambdaName = $"<lambda>_{_lambdaCounter}";
 
         // Lambda parameters are object-typed (type erasure — matches delegate Func<object, object>)
         var parameters = lambda.Parameters.Select((p, i) => new IrParameter
@@ -3350,51 +3369,276 @@ public sealed class IrLowering
             Index = i,
         }).ToList();
 
-        // Build the lambda body: evaluate the body expression and return it
-        var entryBlock = new IrBasicBlock { Label = NewBlockLabel("lambda_entry") };
-        var body = new List<IrBasicBlock> { entryBlock };
+        // Lambda return type: use object for type erasure consistency.
+        // This ensures delegate compatibility at call sites (IrInvokeDelegate uses Func<object, ..., object>).
+        // Value types are auto-boxed by the emitter when the return type is object.
+        var returnType = (CulebralType)PrimitiveType.Object;
 
-        // Infer the lambda body's return type for correct delegate signature
-        // This is critical for .NET interop — ASP.NET inspects delegate return types
-        var bodyType = _typeChecker.ResolvedTypes.TryGetValue(lambda.Body, out var bt) ? bt : PrimitiveType.Object;
-        var returnType = bodyType ?? PrimitiveType.Object;
+        // Identify free variables: names used in body that aren't lambda params
+        var lambdaParamNames = new HashSet<string>(lambda.Parameters.Select(p => p.Name));
+        var freeVars = CollectFreeVariables(lambda.Body, lambdaParamNames);
 
-        var irFunc = new IrFunction
+        // Filter to only variables that exist in the enclosing scope
+        var captures = new List<(string Name, int OuterLocalIndex, bool IsParam)>();
+        foreach (var name in freeVars)
         {
-            Name = lambdaName,
-            ReturnType = returnType,
-            Parameters = parameters,
-            Body = body,
-            IsStatic = true,
-        };
+            var outerLocal = _currentFunction.Locals.FirstOrDefault(l => l.Name == name);
+            if (outerLocal is not null)
+            {
+                captures.Add((name, outerLocal.Index, false));
+            }
+            else
+            {
+                var outerParam = _currentFunction.Parameters.FirstOrDefault(p => p.Name == name);
+                if (outerParam is not null)
+                    captures.Add((name, outerParam.Index, true));
+            }
+        }
 
-        // Save current lowering state
-        var prevFunction = _currentFunction;
-        var prevBlock = _currentBlock;
-        var prevLocalCounter = _localCounter;
-        var prevDeclaringType = _currentDeclaringType;
+        if (captures.Count == 0)
+        {
+            // No captures — use existing static lambda path (no closure overhead)
+            _lambdaCounter++;
 
-        _currentFunction = irFunc;
-        _currentBlock = entryBlock;
-        _localCounter = 0;
-        _currentDeclaringType = null;
+            var entryBlock = new IrBasicBlock { Label = NewBlockLabel("lambda_entry") };
+            var body = new List<IrBasicBlock> { entryBlock };
 
-        // Lower the lambda body expression
-        LowerExpression(lambda.Body);
+            var irFunc = new IrFunction
+            {
+                Name = lambdaName,
+                ReturnType = returnType,
+                Parameters = parameters,
+                Body = body,
+                IsStatic = true,
+            };
 
-        _currentBlock.Emit(new IrReturn(true, lambda.Span));
+            // Save current lowering state
+            var prevFunction = _currentFunction;
+            var prevBlock = _currentBlock;
+            var prevLocalCounter = _localCounter;
+            var prevDeclaringType = _currentDeclaringType;
+            var prevTypeDef = _currentTypeDef;
 
-        // Restore lowering state
-        _currentFunction = prevFunction;
-        _currentBlock = prevBlock;
-        _localCounter = prevLocalCounter;
-        _currentDeclaringType = prevDeclaringType;
+            _currentFunction = irFunc;
+            _currentBlock = entryBlock;
+            _localCounter = 0;
+            _currentDeclaringType = null;
+            _currentTypeDef = null;
 
-        // Add the lambda function to the module
-        _module.Functions.Add(irFunc);
+            // Lower the lambda body expression
+            LowerExpression(lambda.Body);
 
-        // At the call site, emit a delegate creation instruction
-        _currentBlock.Emit(new IrCreateDelegate(lambdaName, lambda.Parameters.Count, lambda.Span));
+            _currentBlock.Emit(new IrReturn(true, lambda.Span));
+
+            // Restore lowering state
+            _currentFunction = prevFunction;
+            _currentBlock = prevBlock;
+            _localCounter = prevLocalCounter;
+            _currentDeclaringType = prevDeclaringType;
+            _currentTypeDef = prevTypeDef;
+
+            // Add the lambda function to the module
+            _module.Functions.Add(irFunc);
+
+            // At the call site, emit a delegate creation instruction
+            _currentBlock.Emit(new IrCreateDelegate(lambdaName, lambda.Parameters.Count, lambda.Span));
+        }
+        else
+        {
+            // Closure needed — create a closure class with fields for each captured variable.
+            // The lambda becomes an instance method on the closure class, accessing captures via this.field.
+            // At the call site: instantiate closure, populate fields from outer locals, create delegate.
+            var closureName = $"<lambda>_{_lambdaCounter}_Env";
+            _lambdaCounter++;
+
+            var closureType = new IrTypeDef
+            {
+                Name = closureName,
+                Kind = IrTypeKind.Class,
+            };
+            foreach (var (name, _, _) in captures)
+            {
+                closureType.Fields.Add(new IrField
+                {
+                    Name = name,
+                    Type = PrimitiveType.Object,
+                });
+            }
+
+            // Lambda becomes an instance method on the closure class.
+            // Arg 0 = this, declared params start at arg 1 → shift indices by 1.
+            var closureParams = lambda.Parameters.Select((p, i) => new IrParameter
+            {
+                Name = p.Name,
+                Type = PrimitiveType.Object,
+                Index = i + 1,
+            }).ToList();
+
+            var entryBlock = new IrBasicBlock { Label = NewBlockLabel("lambda_entry") };
+            var body = new List<IrBasicBlock> { entryBlock };
+
+            var irFunc = new IrFunction
+            {
+                Name = lambdaName,
+                ReturnType = returnType,
+                Parameters = closureParams,
+                Body = body,
+                IsStatic = false,
+                DeclaringType = closureName,
+            };
+
+            // Save current lowering state
+            var prevFunction = _currentFunction;
+            var prevBlock = _currentBlock;
+            var prevLocalCounter = _localCounter;
+            var prevDeclaringType = _currentDeclaringType;
+            var prevTypeDef = _currentTypeDef;
+
+            _currentFunction = irFunc;
+            _currentBlock = entryBlock;
+            _localCounter = 0;
+            _currentDeclaringType = closureName;
+            _currentTypeDef = closureType;
+
+            // Lower the lambda body expression.
+            // Inside the lambda, LowerIdentifier will find captured vars as fields on the closure
+            // (via _currentDeclaringType / _currentTypeDef), and lambda params as parameters.
+            LowerExpression(lambda.Body);
+
+            _currentBlock.Emit(new IrReturn(true, lambda.Span));
+
+            // Restore lowering state
+            _currentFunction = prevFunction;
+            _currentBlock = prevBlock;
+            _localCounter = prevLocalCounter;
+            _currentDeclaringType = prevDeclaringType;
+            _currentTypeDef = prevTypeDef;
+
+            // Register the closure type and method
+            closureType.Methods.Add(irFunc);
+            _module.Types.Add(closureType);
+            _typeDefs[closureName] = closureType;
+
+            // At the call site: create closure instance, populate fields, create delegate
+            _currentBlock.Emit(new IrNewObj(closureName, 0, lambda.Span));
+
+            foreach (var (name, outerIdx, isParam) in captures)
+            {
+                _currentBlock.Emit(new IrDup(lambda.Span));
+                if (isParam)
+                    _currentBlock.Emit(new IrLoadArg(outerIdx, lambda.Span));
+                else
+                    _currentBlock.Emit(new IrLoadLocal(outerIdx, lambda.Span));
+                _currentBlock.Emit(new IrStoreField(closureName, name, lambda.Span));
+            }
+
+            // Create delegate from the instance method — closure instance is on the stack
+            _currentBlock.Emit(new IrCreateDelegate(lambdaName, lambda.Parameters.Count, lambda.Span, closureName));
+        }
+    }
+
+    /// <summary>
+    /// Walk an expression AST and collect all IdentifierExpr names that are not in the bound set.
+    /// Used to detect free variables for lambda closure creation.
+    /// </summary>
+    private static HashSet<string> CollectFreeVariables(Expression expr, HashSet<string> boundNames)
+    {
+        var free = new HashSet<string>();
+        CollectFreeVarsRecursive(expr, boundNames, free);
+        return free;
+    }
+
+    private static void CollectFreeVarsRecursive(Expression expr, HashSet<string> bound, HashSet<string> free)
+    {
+        switch (expr)
+        {
+            case IdentifierExpr ident:
+                if (!bound.Contains(ident.Name))
+                    free.Add(ident.Name);
+                break;
+            case BinaryExpr bin:
+                CollectFreeVarsRecursive(bin.Left, bound, free);
+                CollectFreeVarsRecursive(bin.Right, bound, free);
+                break;
+            case CallExpr call:
+                CollectFreeVarsRecursive(call.Callee, bound, free);
+                foreach (var arg in call.Arguments)
+                    CollectFreeVarsRecursive(arg.Value, bound, free);
+                break;
+            case MemberAccessExpr member:
+                CollectFreeVarsRecursive(member.Object, bound, free);
+                break;
+            case FStringExpr fstr:
+                foreach (var part in fstr.Parts)
+                    if (part is FStringInterpolation interp)
+                        CollectFreeVarsRecursive(interp.Expr, bound, free);
+                break;
+            case ConditionalExpr cond:
+                CollectFreeVarsRecursive(cond.Condition, bound, free);
+                CollectFreeVarsRecursive(cond.TrueExpr, bound, free);
+                CollectFreeVarsRecursive(cond.FalseExpr, bound, free);
+                break;
+            case UnaryExpr unary:
+                CollectFreeVarsRecursive(unary.Operand, bound, free);
+                break;
+            case IndexExpr idx:
+                CollectFreeVarsRecursive(idx.Object, bound, free);
+                CollectFreeVarsRecursive(idx.Index, bound, free);
+                break;
+            case ListExpr list:
+                foreach (var elem in list.Elements)
+                    CollectFreeVarsRecursive(elem, bound, free);
+                break;
+            case TupleExpr tuple:
+                foreach (var elem in tuple.Elements)
+                    CollectFreeVarsRecursive(elem, bound, free);
+                break;
+            case DictExpr dict:
+                foreach (var (key, value) in dict.Entries)
+                {
+                    CollectFreeVarsRecursive(key, bound, free);
+                    CollectFreeVarsRecursive(value, bound, free);
+                }
+                break;
+            case SetExpr set:
+                foreach (var elem in set.Elements)
+                    CollectFreeVarsRecursive(elem, bound, free);
+                break;
+            case SliceExpr slice:
+                CollectFreeVarsRecursive(slice.Object, bound, free);
+                if (slice.Lower is not null) CollectFreeVarsRecursive(slice.Lower, bound, free);
+                if (slice.Upper is not null) CollectFreeVarsRecursive(slice.Upper, bound, free);
+                if (slice.Step is not null) CollectFreeVarsRecursive(slice.Step, bound, free);
+                break;
+            case IsExpr isExpr:
+                CollectFreeVarsRecursive(isExpr.Left, bound, free);
+                break;
+            case InExpr inExpr:
+                CollectFreeVarsRecursive(inExpr.Left, bound, free);
+                CollectFreeVarsRecursive(inExpr.Right, bound, free);
+                break;
+            case StarredExpr starred:
+                CollectFreeVarsRecursive(starred.Operand, bound, free);
+                break;
+            case AwaitExpr awaitExpr:
+                CollectFreeVarsRecursive(awaitExpr.Operand, bound, free);
+                break;
+            case LambdaExpr nestedLambda:
+                // Nested lambda introduces its own parameters as bound names
+                var nestedBound = new HashSet<string>(bound);
+                foreach (var p in nestedLambda.Parameters)
+                    nestedBound.Add(p.Name);
+                CollectFreeVarsRecursive(nestedLambda.Body, nestedBound, free);
+                break;
+            // Literals and other leaf nodes — no free variables
+            case IntLiteralExpr:
+            case FloatLiteralExpr:
+            case StringLiteralExpr:
+            case BoolLiteralExpr:
+            case NoneLiteralExpr:
+            case FieldAccessExpr:
+                break;
+        }
     }
 
     private void LowerSliceExpr(SliceExpr slice)
