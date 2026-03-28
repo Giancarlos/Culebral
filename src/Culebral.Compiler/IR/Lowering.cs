@@ -2028,7 +2028,8 @@ public sealed class IrLowering
             return;
         }
 
-        // Unknown identifier — emit null placeholder
+        // Unknown identifier — emit null with warning (type checker should have caught this)
+        _diagnostics.Warning("LEB3002", $"Unresolved identifier '{ident.Name}' in lowering — emitting null", ident.Span);
         _currentBlock.Emit(new IrLoadNull(ident.Span));
     }
 

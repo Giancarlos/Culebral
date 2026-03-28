@@ -2504,7 +2504,9 @@ public sealed class CilEmitter
                             break;
 
                         default:
-                            // For all other instructions, emit them normally using empty locals
+                            // Assert no IrStoreLocal/IrLoadLocal reaches here (should be hoisted)
+                            System.Diagnostics.Debug.Assert(instr is not IrStoreLocal and not IrLoadLocal,
+                                $"Generator: {instr.GetType().Name} should be hoisted to fields");
                             EmitInstruction(il, instr, [], blockLabels, func, null);
                             break;
                     }

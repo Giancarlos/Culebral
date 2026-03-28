@@ -488,4 +488,32 @@ public class CulebralScriptApiTests
                     x = x + 1
                 """, options: opts));
     }
+
+    // ─── Input Validation & Exception Handling Tests ───
+
+    [Fact]
+    public void Evaluate_NullCode_ThrowsArgumentNull()
+    {
+        Assert.Throws<ArgumentNullException>(() => CulebralScript.Evaluate<int>(null!));
+    }
+
+    [Fact]
+    public void Evaluate_EmptyCode_ThrowsArgument()
+    {
+        Assert.Throws<ArgumentException>(() => CulebralScript.Evaluate<int>(""));
+    }
+
+    [Fact]
+    public void Evaluate_InvalidTypeConversion_ThrowsScriptException()
+    {
+        // Script outputs a string, but we ask for Guid — should throw CulebralScriptException, not InvalidCastException
+        Assert.Throws<CulebralScriptException>(() => CulebralScript.Evaluate<Guid>("print('hello')"));
+    }
+
+    [Fact]
+    public void Evaluate_ScriptThrows_ThrowsScriptException()
+    {
+        Assert.Throws<CulebralScriptException>(() =>
+            CulebralScript.Execute("raise Exception('boom')"));
+    }
 }

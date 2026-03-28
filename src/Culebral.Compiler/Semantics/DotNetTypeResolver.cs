@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Reflection;
 using System.Text;
 
@@ -10,8 +11,8 @@ namespace Culebral.Compiler.Semantics;
 /// </summary>
 public sealed class DotNetTypeResolver
 {
-    private readonly Dictionary<string, Type> _typeCache = new();
-    private readonly Dictionary<string, MethodInfo> _methodCache = new();
+    private readonly ConcurrentDictionary<string, Type> _typeCache = new();
+    private readonly ConcurrentDictionary<string, MethodInfo> _methodCache = new();
 
     /// <summary>
     /// Resolve a fully-qualified .NET type name to a System.Type.

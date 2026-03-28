@@ -24,6 +24,12 @@ public static class CulebralScript
     /// </summary>
     public static T Evaluate<T>(string code, object? globals = null)
     {
+        ArgumentNullException.ThrowIfNull(code);
+        if (code.Length == 0)
+            throw new ArgumentException("Code cannot be empty.", nameof(code));
+        if (code.Length > 10 * 1024 * 1024)
+            throw new ArgumentException("Code exceeds maximum size (10 MB).", nameof(code));
+
         var wrappedSource = WrapAsScript(code);
 
         var diagnostics = new DiagnosticBag();
@@ -33,38 +39,57 @@ public static class CulebralScript
 
         // Load into collectible ALC
         var alc = new ScriptLoadContext();
-        using var peStream = new MemoryStream(assemblyBytes);
-        using var pdbStream = pdbBytes != null ? new MemoryStream(pdbBytes) : null;
-        var assembly = alc.LoadFromStream(peStream, pdbStream);
-
-        // Find and invoke entry point
-        var entryPoint = assembly.EntryPoint
-            ?? throw new CulebralScriptException("No entry point found in compiled script.");
-
-        // Capture stdout under lock to prevent interleaving with parallel scripts
-        string output;
-        lock (ConsoleLock)
+        try
         {
-            var oldOut = Console.Out;
-            using var sw = new StringWriter();
-            Console.SetOut(sw);
+            using var peStream = new MemoryStream(assemblyBytes);
+            using var pdbStream = pdbBytes != null ? new MemoryStream(pdbBytes) : null;
+            var assembly = alc.LoadFromStream(peStream, pdbStream);
+
+            // Find and invoke entry point
+            var entryPoint = assembly.EntryPoint
+                ?? throw new CulebralScriptException("No entry point found in compiled script.");
+
+            // Capture stdout under lock to prevent interleaving with parallel scripts
+            string output;
+            lock (ConsoleLock)
+            {
+                var oldOut = Console.Out;
+                using var sw = new StringWriter();
+                Console.SetOut(sw);
+                try
+                {
+                    try
+                    {
+                        entryPoint.Invoke(null, entryPoint.GetParameters().Length > 0 ? new object?[] { null } : null);
+                    }
+                    catch (TargetInvocationException ex)
+                    {
+                        throw new CulebralScriptException("Script execution failed.", ex.InnerException ?? ex);
+                    }
+                }
+                finally
+                {
+                    Console.SetOut(oldOut);
+                }
+                output = sw.ToString().TrimEnd();
+            }
+
+            // Convert output to T
+            if (typeof(T) == typeof(string)) return (T)(object)output;
+            if (typeof(T) == typeof(object)) return (T)(object)output;
             try
             {
-                entryPoint.Invoke(null, entryPoint.GetParameters().Length > 0 ? new object?[] { null } : null);
+                return (T)Convert.ChangeType(output, typeof(T));
             }
-            finally
+            catch (Exception ex) when (ex is InvalidCastException or FormatException or OverflowException)
             {
-                Console.SetOut(oldOut);
+                throw new CulebralScriptException($"Cannot convert script output to {typeof(T).Name}: '{output}'", ex);
             }
-            output = sw.ToString().TrimEnd();
         }
-
-        alc.Unload();
-
-        // Convert output to T
-        if (typeof(T) == typeof(string)) return (T)(object)output;
-        if (typeof(T) == typeof(object)) return (T)(object)output;
-        return (T)Convert.ChangeType(output, typeof(T));
+        finally
+        {
+            alc.Unload();
+        }
     }
 
     /// <summary>
@@ -72,6 +97,12 @@ public static class CulebralScript
     /// </summary>
     public static string Execute(string code, object? globals = null, CulebralScriptOptions? options = null)
     {
+        ArgumentNullException.ThrowIfNull(code);
+        if (code.Length == 0)
+            throw new ArgumentException("Code cannot be empty.", nameof(code));
+        if (code.Length > 10 * 1024 * 1024)
+            throw new ArgumentException("Code exceeds maximum size (10 MB).", nameof(code));
+
         var wrappedSource = WrapAsScript(code);
 
         var diagnostics = new DiagnosticBag();
@@ -80,32 +111,45 @@ public static class CulebralScript
             throw new CulebralScriptException("Compilation failed:\n" + diagnostics.FormatAll());
 
         var alc = new ScriptLoadContext();
-        using var peStream = new MemoryStream(assemblyBytes);
-        using var pdbStream = pdbBytes != null ? new MemoryStream(pdbBytes) : null;
-        var assembly = alc.LoadFromStream(peStream, pdbStream);
-
-        var entryPoint = assembly.EntryPoint
-            ?? throw new CulebralScriptException("No entry point found in compiled script.");
-
-        string output;
-        lock (ConsoleLock)
+        try
         {
-            var oldOut = Console.Out;
-            using var sw = new StringWriter();
-            Console.SetOut(sw);
-            try
-            {
-                InvokeWithTimeout(entryPoint, options?.Timeout);
-            }
-            finally
-            {
-                Console.SetOut(oldOut);
-            }
-            output = sw.ToString();
-        }
+            using var peStream = new MemoryStream(assemblyBytes);
+            using var pdbStream = pdbBytes != null ? new MemoryStream(pdbBytes) : null;
+            var assembly = alc.LoadFromStream(peStream, pdbStream);
 
-        alc.Unload();
-        return output;
+            var entryPoint = assembly.EntryPoint
+                ?? throw new CulebralScriptException("No entry point found in compiled script.");
+
+            string output;
+            lock (ConsoleLock)
+            {
+                var oldOut = Console.Out;
+                using var sw = new StringWriter();
+                Console.SetOut(sw);
+                try
+                {
+                    try
+                    {
+                        InvokeWithTimeout(entryPoint, options?.Timeout);
+                    }
+                    catch (TargetInvocationException ex)
+                    {
+                        throw new CulebralScriptException("Script execution failed.", ex.InnerException ?? ex);
+                    }
+                }
+                finally
+                {
+                    Console.SetOut(oldOut);
+                }
+                output = sw.ToString();
+            }
+
+            return output;
+        }
+        finally
+        {
+            alc.Unload();
+        }
     }
 
     /// <summary>
@@ -113,6 +157,12 @@ public static class CulebralScript
     /// </summary>
     public static ScriptState<T> Run<T>(string code, object? globals = null)
     {
+        ArgumentNullException.ThrowIfNull(code);
+        if (code.Length == 0)
+            throw new ArgumentException("Code cannot be empty.", nameof(code));
+        if (code.Length > 10 * 1024 * 1024)
+            throw new ArgumentException("Code exceeds maximum size (10 MB).", nameof(code));
+
         var result = Execute(code, globals);
         var trimmed = result.TrimEnd();
         T returnValue = default!;
@@ -159,8 +209,8 @@ public static class CulebralScript
             throw new TimeoutException($"Script execution exceeded {timeout.Value.TotalSeconds}s timeout.");
 
         // Re-throw any exception from the script
-        if (task.IsFaulted)
-            throw task.Exception!.InnerException ?? task.Exception;
+        if (task.IsFaulted && task.Exception is not null)
+            throw task.Exception.InnerException ?? task.Exception;
     }
 
     /// <summary>
@@ -209,6 +259,7 @@ public sealed class CulebralScript<TReturn> : IDisposable
     private readonly byte[]? _assemblyBytes;
     private readonly byte[]? _pdbBytes;
     private readonly IReadOnlyList<Diagnostic> _diagnostics;
+    private readonly object _delegateLock = new();
     private ScriptLoadContext? _cachedAlc;
     private Assembly? _cachedAssembly;
     private MethodInfo? _cachedEntryPoint;
@@ -248,45 +299,50 @@ public sealed class CulebralScript<TReturn> : IDisposable
                 string.Join("\n", _diagnostics.Select(d => d.ToString())));
 
         var alc = new ScriptLoadContext();
-        using var peStream = new MemoryStream(_assemblyBytes!);
-        using var pdbStream = _pdbBytes != null ? new MemoryStream(_pdbBytes) : null;
-        var assembly = alc.LoadFromStream(peStream, pdbStream);
-        var entryPoint = assembly.EntryPoint
-            ?? throw new CulebralScriptException("No entry point found in compiled script.");
-
-        string output;
-        Exception? error = null;
-        lock (CulebralScript.ConsoleLock)
+        try
         {
-            var oldOut = Console.Out;
-            using var sw = new StringWriter();
-            Console.SetOut(sw);
-            try
+            using var peStream = new MemoryStream(_assemblyBytes!);
+            using var pdbStream = _pdbBytes != null ? new MemoryStream(_pdbBytes) : null;
+            var assembly = alc.LoadFromStream(peStream, pdbStream);
+            var entryPoint = assembly.EntryPoint
+                ?? throw new CulebralScriptException("No entry point found in compiled script.");
+
+            string output;
+            Exception? error = null;
+            lock (CulebralScript.ConsoleLock)
             {
-                entryPoint.Invoke(null, entryPoint.GetParameters().Length > 0 ? new object?[] { null } : null);
+                var oldOut = Console.Out;
+                using var sw = new StringWriter();
+                Console.SetOut(sw);
+                try
+                {
+                    entryPoint.Invoke(null, entryPoint.GetParameters().Length > 0 ? new object?[] { null } : null);
+                }
+                catch (TargetInvocationException ex)
+                {
+                    error = ex.InnerException ?? ex;
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    Console.SetOut(oldOut);
+                }
+                output = sw.ToString();
             }
-            catch (TargetInvocationException ex)
-            {
-                error = ex.InnerException ?? ex;
-            }
-            catch (Exception ex)
-            {
-                error = ex;
-            }
-            finally
-            {
-                Console.SetOut(oldOut);
-            }
-            output = sw.ToString();
+
+            if (error != null)
+                return new ScriptResult<TReturn>(default!, output, error);
+
+            TReturn result = ConvertOutput(output);
+            return new ScriptResult<TReturn>(result, output, null);
         }
-
-        alc.Unload();
-
-        if (error != null)
-            return new ScriptResult<TReturn>(default!, output, error);
-
-        TReturn result = ConvertOutput(output);
-        return new ScriptResult<TReturn>(result, output, null);
+        finally
+        {
+            alc.Unload();
+        }
     }
 
     /// <summary>
@@ -300,34 +356,64 @@ public sealed class CulebralScript<TReturn> : IDisposable
             throw new CulebralScriptException("Script has compilation errors:\n" +
                 string.Join("\n", _diagnostics.Select(d => d.ToString())));
 
-        _cachedAlc = new ScriptLoadContext();
-        using var peStream = new MemoryStream(_assemblyBytes!);
-        using var pdbStream = _pdbBytes != null ? new MemoryStream(_pdbBytes) : null;
-        _cachedAssembly = _cachedAlc.LoadFromStream(peStream, pdbStream);
-        _cachedEntryPoint = _cachedAssembly.EntryPoint
-            ?? throw new CulebralScriptException("No entry point found in compiled script.");
-
-        return () =>
+        lock (_delegateLock)
         {
-            string output;
-            lock (CulebralScript.ConsoleLock)
+            if (_cachedEntryPoint is not null)
             {
-                var oldOut = Console.Out;
-                using var sw = new StringWriter();
-                Console.SetOut(sw);
-                try
+                // Already initialized — return cached delegate
+                var ep = _cachedEntryPoint;
+                return () =>
                 {
-                    _cachedEntryPoint!.Invoke(null,
-                        _cachedEntryPoint.GetParameters().Length > 0 ? new object?[] { null } : null);
-                }
-                finally
-                {
-                    Console.SetOut(oldOut);
-                }
-                output = sw.ToString();
+                    string output;
+                    lock (CulebralScript.ConsoleLock)
+                    {
+                        var oldOut = Console.Out;
+                        using var sw = new StringWriter();
+                        Console.SetOut(sw);
+                        try
+                        {
+                            ep.Invoke(null,
+                                ep.GetParameters().Length > 0 ? new object?[] { null } : null);
+                        }
+                        finally
+                        {
+                            Console.SetOut(oldOut);
+                        }
+                        output = sw.ToString();
+                    }
+                    return ConvertOutput(output);
+                };
             }
-            return ConvertOutput(output);
-        };
+
+            _cachedAlc = new ScriptLoadContext();
+            using var peStream = new MemoryStream(_assemblyBytes!);
+            using var pdbStream = _pdbBytes != null ? new MemoryStream(_pdbBytes) : null;
+            _cachedAssembly = _cachedAlc.LoadFromStream(peStream, pdbStream);
+            _cachedEntryPoint = _cachedAssembly.EntryPoint
+                ?? throw new CulebralScriptException("No entry point found in compiled script.");
+
+            return () =>
+            {
+                string output;
+                lock (CulebralScript.ConsoleLock)
+                {
+                    var oldOut = Console.Out;
+                    using var sw = new StringWriter();
+                    Console.SetOut(sw);
+                    try
+                    {
+                        _cachedEntryPoint!.Invoke(null,
+                            _cachedEntryPoint.GetParameters().Length > 0 ? new object?[] { null } : null);
+                    }
+                    finally
+                    {
+                        Console.SetOut(oldOut);
+                    }
+                    output = sw.ToString();
+                }
+                return ConvertOutput(output);
+            };
+        }
     }
 
     /// <summary>Convert captured stdout to the target return type.</summary>
