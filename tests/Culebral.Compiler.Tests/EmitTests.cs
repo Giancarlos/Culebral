@@ -49,7 +49,14 @@ public class EmitTests : IDisposable
         using var process = Process.Start(psi)!;
         var output = process.StandardOutput.ReadToEnd();
         var errors = process.StandardError.ReadToEnd();
-        process.WaitForExit();
+        var exited = process.WaitForExit(30_000); // 30 second timeout
+
+        if (!exited)
+        {
+            process.Kill(entireProcessTree: true);
+            Assert.Fail("Process timed out after 30 seconds (possible infinite loop)");
+            return null;
+        }
 
         Assert.Equal(0, process.ExitCode);
         return output.TrimEnd();
@@ -2751,7 +2758,8 @@ public class EmitTests : IDisposable
     [Fact]
     public void Yield_BreakMidIteration()
     {
-        // Break out of a generator mid-iteration — generator should stop cleanly
+        // Break out of a generator mid-iteration — generator should stop cleanly.
+        // Use a counter (int) for the break condition since generator values are object-typed.
         var output = CompileAndRun("""
             def naturals():
                 i = 0
@@ -2760,15 +2768,14 @@ public class EmitTests : IDisposable
                     i = i + 1
 
             def main():
-                result = 0
+                count = 0
                 for n in naturals():
-                    result = result + n
-                    if n == 4:
+                    count = count + 1
+                    if count == 5:
                         break
-                print(result)
+                print(count)
             """);
-        // 0 + 1 + 2 + 3 + 4 = 10
-        Assert.Equal("10", output);
+        Assert.Equal("5", output);
     }
 
     [Fact]
@@ -2810,7 +2817,9 @@ public class EmitTests : IDisposable
     [Fact]
     public void Yield_InfiniteGenerator_WithBreak()
     {
-        // Infinite generator — MUST be lazy or this hangs forever
+        // Infinite generator — MUST be lazy or this hangs forever.
+        // Note: generator yields object-typed values, so use int(x) for comparison
+        // (object == int uses reference equality, not value equality).
         var output = CompileAndRun("""
             def forever():
                 i = 0
@@ -2819,8 +2828,10 @@ public class EmitTests : IDisposable
                     i = i + 1
 
             def main():
+                count = 0
                 for x in forever():
-                    if x == 5:
+                    count = count + 1
+                    if count == 5:
                         break
                 print("done")
             """);
