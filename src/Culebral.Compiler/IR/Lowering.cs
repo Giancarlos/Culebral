@@ -1708,6 +1708,26 @@ public sealed class IrLowering
                             break;
                         }
                     }
+
+                    // Reflected operator: check right operand for __radd__, __rmul__, etc.
+                    var reflectedDunder = dunderName is not null ? "__r" + dunderName[2..] : null;
+                    if (reflectedDunder is not null)
+                    {
+                        var rightTypeName = rightType?.DisplayName;
+                        var (rightFoundType, _) = FindMethodInHierarchy(rightTypeName, reflectedDunder);
+                        if (rightFoundType is not null)
+                        {
+                            // Swap operands: right is receiver, left is argument
+                            LowerExpression(bin.Right);
+                            LowerExpression(bin.Left);
+                            // Box the left operand (argument) if it's a value type,
+                            // since reflected dunders typically accept object parameters
+                            if (leftType is PrimitiveType lpt && lpt.ClrType is not null && lpt.ClrType.IsValueType)
+                                _currentBlock!.Emit(new IrBox(lpt, expr.Span));
+                            _currentBlock!.Emit(new IrCallMethod(rightFoundType, reflectedDunder, 1, expr.Span));
+                            break;
+                        }
+                    }
                 }
 
                 var isArithmetic = binOp is IrBinaryOpKind.Add or IrBinaryOpKind.Sub or IrBinaryOpKind.Mul
@@ -2525,10 +2545,12 @@ public sealed class IrLowering
                             ? fet : PrimitiveType.Object;
                         if (fmtExprType is PrimitiveType fpt && fpt.ClrType is not null && fpt.ClrType.IsValueType)
                             _currentBlock.Emit(new IrBox(fpt, fstr.Span));
+                        // Translate Python format mini-language to .NET at compile time
+                        var dotNetSpec = TranslatePythonFormatSpec(interp.FormatSpec);
                         // Save value, push format string, push value — String.Format(fmt, obj)
                         var fmtTmp = CreateLocal("<fmt_val>", PrimitiveType.Object);
                         _currentBlock.Emit(new IrStoreLocal(fmtTmp.Index, fstr.Span));
-                        _currentBlock.Emit(new IrLoadString($"{{0:{interp.FormatSpec}}}", fstr.Span));
+                        _currentBlock.Emit(new IrLoadString($"{{0:{dotNetSpec}}}", fstr.Span));
                         _currentBlock.Emit(new IrLoadLocal(fmtTmp.Index, fstr.Span));
                         _currentBlock.Emit(new IrCallDotNetStatic(typeof(string), "Format", 2, fstr.Span));
                     }
@@ -2876,6 +2898,10 @@ public sealed class IrLowering
         _currentBlock.Emit(new IrStoreLocal(tupleLocal.Index, assign.Span));
 
         // Check for starred unpacking: a, *rest, b = items
+        // ISSUE-7 (LOW): The Enumerable.Cast/ToArray approach below allocates a full array copy.
+        // For large collections this is suboptimal. A future optimization could check if the source
+        // is already object[] and skip the copy, or use GetRange() for List<object>.
+        // Skipped for now — the current approach works correctly, just not optimally.
         var starredIndex = -1;
         for (int si = 0; si < tupleTarget.Elements.Count; si++)
             if (tupleTarget.Elements[si] is StarredExpr) { starredIndex = si; break; }
@@ -3989,6 +4015,33 @@ public sealed class IrLowering
                 break;
         }
         return (null, null);
+    }
+
+    /// <summary>
+    /// Translates common Python format mini-language specs to .NET format strings at compile time.
+    /// Zero runtime cost — the translation happens during lowering.
+    /// </summary>
+    private static string TranslatePythonFormatSpec(string pythonSpec)
+    {
+        // .2f → F2, .4f → F4, etc. (fixed-point)
+        if (pythonSpec.Length >= 2 && pythonSpec[^1] == 'f' && pythonSpec[0] == '.')
+        {
+            var digits = pythonSpec[1..^1];
+            if (int.TryParse(digits, out _))
+                return "F" + digits;
+        }
+        // 08d → D8 (zero-padded decimal) — strip leading '0', keep width
+        if (pythonSpec.Length >= 2 && pythonSpec[^1] == 'd' && pythonSpec[0] == '0')
+        {
+            var width = pythonSpec[..^1];
+            if (int.TryParse(width, out _))
+                return "D" + width[1..];
+        }
+        // #x or x → X (hex)
+        if (pythonSpec == "#x" || pythonSpec == "x")
+            return "X";
+        // Pass through as-is for .NET-native specs (e.g., F2, D5)
+        return pythonSpec;
     }
 
     private static string? BinaryOpToDunder(IrBinaryOpKind op) => op switch

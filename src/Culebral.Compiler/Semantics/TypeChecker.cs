@@ -55,9 +55,75 @@ public sealed class TypeChecker
         foreach (var stmt in unit.Statements)
             DeclareTopLevel(stmt);
 
+        // Pass 1.5: Collect field declarations for all classes (enables forward-declared inheritance).
+        // This must run before pass 2 so that when a derived class is checked before its base class,
+        // _classFields already has the base class's fields available for inheritance lookup.
+        foreach (var stmt in unit.Statements)
+        {
+            if (stmt is ClassDef cls)
+                CollectClassFields(cls);
+        }
+
         // Pass 2: Check bodies
         foreach (var stmt in unit.Statements)
             CheckNode(stmt);
+    }
+
+    /// <summary>
+    /// Pre-collects field declarations for a class without full type checking.
+    /// Populates _classFields so that forward-declared base classes have their fields
+    /// available during pass 2 inheritance resolution.
+    /// </summary>
+    private void CollectClassFields(ClassDef cls)
+    {
+        if (_classFields.ContainsKey(cls.Name))
+            return; // Already collected (e.g., via earlier inheritance chain)
+
+        // Temporarily register type parameters so ResolveTypeAnnotation doesn't error on T, U, etc.
+        var addedParams = new List<string>();
+        if (cls.TypeParameters is not null)
+        {
+            foreach (var tp in cls.TypeParameters)
+            {
+                if (_knownTypeParams.Add(tp.Name))
+                    addedParams.Add(tp.Name);
+            }
+        }
+
+        var fields = new List<Symbol>();
+        foreach (var member in cls.Members)
+        {
+            if (member is FieldDeclaration field)
+            {
+                var fieldType = ResolveTypeAnnotation(field.Type);
+                fields.Add(new Symbol
+                {
+                    Name = field.Name,
+                    Kind = SymbolKind.Field,
+                    Type = fieldType,
+                    DeclaringScope = cls.Name,
+                });
+            }
+        }
+
+        // Clean up temporarily registered type parameters
+        foreach (var p in addedParams)
+            _knownTypeParams.Remove(p);
+
+        // Also collect inherited fields from base classes (recursively)
+        foreach (var baseType in cls.Bases)
+        {
+            if (baseType is SimpleType baseSt)
+            {
+                if (_classFields.TryGetValue(baseSt.Name, out var baseFields))
+                {
+                    foreach (var baseSym in baseFields)
+                        fields.Add(baseSym);
+                }
+            }
+        }
+
+        _classFields[cls.Name] = fields;
     }
 
     // ─── Pass 1: Declarations ───

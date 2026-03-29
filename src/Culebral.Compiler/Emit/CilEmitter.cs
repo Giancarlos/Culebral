@@ -88,8 +88,12 @@ public sealed class CilEmitter
 
     private void EmitTypes(IrModule module)
     {
+        // Sort types topologically so base classes are defined before derived classes.
+        // This ensures forward-declared base classes (e.g., Dog(Animal) before Animal) work correctly.
+        var sortedTypes = TopologicalSortTypes(module.Types);
+
         // First pass: define all types (forward references)
-        foreach (var typeDef in module.Types)
+        foreach (var typeDef in sortedTypes)
         {
             var attrs = GetTypeAttributes(typeDef);
             TypeBuilder tb;
@@ -124,7 +128,7 @@ public sealed class CilEmitter
         }
 
         // Second pass: define fields, constructors, methods, properties
-        foreach (var typeDef in module.Types)
+        foreach (var typeDef in sortedTypes)
         {
             var tb = _typeBuilders[typeDef.Name];
 
@@ -3641,7 +3645,7 @@ public sealed class CilEmitter
     private void EmitVirtualCall(ILGenerator il, string name, int argc,
         IrInstruction? instr = null, IrFunction? func = null)
     {
-        // Handle well-known enumerator methods
+        // Handle well-known interface methods
         switch (name)
         {
             case "GetEnumerator":
@@ -3650,6 +3654,21 @@ public sealed class CilEmitter
             case "MoveNext":
                 il.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetMethod("MoveNext")!);
                 return;
+            case "Dispose" when argc == 0:
+            {
+                // Safe dispose: only call Dispose if object implements IDisposable
+                il.Emit(OpCodes.Isinst, typeof(IDisposable));
+                il.Emit(OpCodes.Dup);
+                var skipDispose = il.DefineLabel();
+                il.Emit(OpCodes.Brfalse, skipDispose);
+                il.Emit(OpCodes.Callvirt, typeof(IDisposable).GetMethod("Dispose")!);
+                var afterDispose = il.DefineLabel();
+                il.Emit(OpCodes.Br, afterDispose);
+                il.MarkLabel(skipDispose);
+                il.Emit(OpCodes.Pop);
+                il.MarkLabel(afterDispose);
+                return;
+            }
             case "get_Current":
                 il.Emit(OpCodes.Callvirt, typeof(System.Collections.IEnumerator).GetProperty("Current")!.GetGetMethod()!);
                 return;
@@ -3806,6 +3825,7 @@ public sealed class CilEmitter
         }
 
         // ── list.append(x) → IList.Add(object) — returns int index (caller handles discard) ──
+        // Expected receiver type: list (List<object>). Calling on non-list will throw InvalidCastException at runtime.
         if (name == "append" && argc == 1)
         {
             // Stack: [list(object), value(???)]
@@ -3826,6 +3846,7 @@ public sealed class CilEmitter
         }
 
         // ── list.pop() → RemoveAt(Count-1) and return the removed element ──
+        // Expected receiver type: list (List<object>). Calling on non-list will throw InvalidCastException at runtime.
         if (name == "pop" && argc == 0)
         {
             // Stack: [list]
@@ -3853,6 +3874,7 @@ public sealed class CilEmitter
         }
 
         // ── list.insert(i, x) → List<object>.Insert(i, x) ──
+        // Expected receiver type: list (List<object>).
         if (name == "insert" && argc == 2)
         {
             il.Emit(OpCodes.Callvirt, typeof(List<object>).GetMethod("Insert", [typeof(int), typeof(object)])!);
@@ -3860,6 +3882,7 @@ public sealed class CilEmitter
         }
 
         // ── list.clear() / dict.clear() / set.clear() ──
+        // Expected receiver type: list, dict, or set (any IList).
         if (name == "clear" && argc == 0)
         {
             // ICollection<object>.Clear() works for List, Dict, HashSet
@@ -3868,6 +3891,7 @@ public sealed class CilEmitter
         }
 
         // ── list.copy() → new List<object>(original) ──
+        // Expected receiver type: list (any IEnumerable).
         if (name == "copy" && argc == 0)
         {
             il.Emit(OpCodes.Castclass, typeof(System.Collections.IEnumerable));
@@ -3876,6 +3900,7 @@ public sealed class CilEmitter
         }
 
         // ── dict.keys() → Dictionary.Keys property ──
+        // Expected receiver type: dict (Dictionary<object, object>). Calling on non-dict will throw InvalidCastException.
         if (name == "keys" && argc == 0)
         {
             il.Emit(OpCodes.Castclass, typeof(Dictionary<object, object>));
@@ -3884,6 +3909,7 @@ public sealed class CilEmitter
         }
 
         // ── dict.values() → Dictionary.Values property ──
+        // Expected receiver type: dict (Dictionary<object, object>). Calling on non-dict will throw InvalidCastException.
         if (name == "values" && argc == 0)
         {
             il.Emit(OpCodes.Castclass, typeof(Dictionary<object, object>));
@@ -3892,6 +3918,7 @@ public sealed class CilEmitter
         }
 
         // ── dict.items() → materialize to list of (key, value) tuples ──
+        // Expected receiver type: dict (Dictionary<object, object>). Calling on non-dict will throw InvalidCastException.
         if (name == "items" && argc == 0)
         {
             // Iterate dict, create list of object[] tuples
@@ -3940,6 +3967,7 @@ public sealed class CilEmitter
         }
 
         // ── dict.pop(key) → remove and return value ──
+        // Expected receiver type: dict (Dictionary<object, object>). Calling on non-dict will throw InvalidCastException.
         if (name == "pop" && argc == 1)
         {
             // Stack: [dict, key]. TryGetValue + Remove
@@ -3963,6 +3991,7 @@ public sealed class CilEmitter
         }
 
         // ── dict.get(key) and dict.get(key, default) ──
+        // Expected receiver type: dict (Dictionary<object, object>). Calling on non-dict will throw InvalidCastException.
         if (name == "get" && argc is 1 or 2)
         {
             LocalBuilder? getDefault = null;
@@ -4022,7 +4051,7 @@ public sealed class CilEmitter
             SourceSpan.None);
         for (int i = 0; i < argc + 1; i++)
             il.Emit(OpCodes.Pop);
-        il.Emit(OpCodes.Ldstr, $"Method '{name}' not found");
+        il.Emit(OpCodes.Ldstr, $"Method '{name}' not found. Check the receiver type supports this method.");
         il.Emit(OpCodes.Newobj, typeof(MissingMethodException).GetConstructor([typeof(string)])!);
         il.Emit(OpCodes.Throw);
     }
@@ -6190,6 +6219,48 @@ public sealed class CilEmitter
             "object" => typeof(object),
             _ => Type.GetType(name),
         };
+    }
+
+    /// <summary>
+    /// Topologically sort type definitions so base classes come before derived classes.
+    /// Falls back to original order if there are cycles (which shouldn't happen in valid programs).
+    /// </summary>
+    private static List<IrTypeDef> TopologicalSortTypes(List<IrTypeDef> types)
+    {
+        var typeMap = new Dictionary<string, IrTypeDef>();
+        foreach (var t in types)
+            typeMap[t.Name] = t;
+
+        var sorted = new List<IrTypeDef>();
+        var visited = new HashSet<string>();
+        var visiting = new HashSet<string>(); // cycle detection
+
+        void Visit(IrTypeDef t)
+        {
+            if (visited.Contains(t.Name)) return;
+            if (visiting.Contains(t.Name)) return; // cycle — break it by skipping
+            visiting.Add(t.Name);
+
+            // Visit base type first if it's a user-defined type in this module
+            if (t.BaseType is not null && typeMap.TryGetValue(t.BaseType, out var baseTypeDef))
+                Visit(baseTypeDef);
+
+            // Visit implemented interfaces if they're user-defined
+            foreach (var iface in t.Interfaces)
+            {
+                if (typeMap.TryGetValue(iface, out var ifaceDef))
+                    Visit(ifaceDef);
+            }
+
+            visiting.Remove(t.Name);
+            if (visited.Add(t.Name))
+                sorted.Add(t);
+        }
+
+        foreach (var t in types)
+            Visit(t);
+
+        return sorted;
     }
 
     private static TypeAttributes GetTypeAttributes(IrTypeDef typeDef)
